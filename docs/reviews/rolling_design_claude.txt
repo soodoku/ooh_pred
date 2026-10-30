@@ -1,0 +1,26 @@
+I can't start yet: the shell is returning empty output for every command, including `echo test`, `whoami` and `ls /`. That means I can't see the repo, the existing fixed-origin code, the "audited lasso functions", or the data. Without those I'd be guessing table names, column names and function signatures, and the rolling analysis would be built on guesses.
+
+**What would unblock this** (any one of these):
+- Check whether shell permissions or a hook are suppressing output, then re-run.
+- Restart the session in `ooh_pred`.
+- Paste the file tree plus the lasso and fixed-origin scripts.
+
+Once I can read the code, here is how I'd proceed. Nothing below has been checked against the repo yet.
+
+**What the design rests on**
+1. **Training-label censoring.** The rule that training labels use only starts *created* before C needs an entry or creation timestamp on admission records. If the placement extract only has start dates, the 30-day buffer can't be enforced, and the design needs a change before any fitting. I'll check this first.
+2. **Reusing the audited lasso functions.** Fold-internal imputation, missingness indicators and vocabulary selection all depend on those functions accepting an arbitrary snapshot frame. If they're hard-wired to the fixed-origin cutoff, I'll add a thin cutoff-parameterised adapter and won't touch the audited code.
+3. **Window feasibility.** The constraints are: windows end by 2016-11-03, and training history starts no earlier than 2012-11-14. With the 365-day outcome window, only the earliest target starts satisfy the first constraint. With the default settings, U = T − 30 − 30 − 180 and the lookback goes back a further 365 days, so the earliest T (January 2015) gives a lookback start around 2013-05, which is fine. I'll print the retained date grid for each setting before fitting, so dropped dates are visible.
+
+**Spec I'd build to**
+- **Data step:** a function `snapshot(cutoff, lookback, gap, horizon, label_entry_limit)` that returns one row per eligible youth.
+- **Person split:** `rsample::initial_split` on member IDs, seed-fixed, done once.
+- **Date grid:** quarterly target starts built with `rsample::sliding_period` (or by hand, if it doesn't map cleanly onto a single landmark).
+- **Outputs, per date and per setting:** n, events, prevalence, ROC AUC, PR-AUC, Brier score, mean predicted risk, the training-prevalence Brier benchmark, and person-bootstrap CIs. Then the descriptive exhibits on the fixed-origin cohort.
+- **Checks:**
+  - A unit test that a planted admission in the gap appears in neither the features nor the label.
+  - A test that a record created after C is excluded from training labels.
+  - An assertion that the train and test ID sets are disjoint.
+  - Linting.
+- **Before any modelling,** I'll show you one snapshot's rows next to the raw source records.
+- **Out of scope:** pooling across dates, selecting settings by results, and changing the fixed-origin analysis.

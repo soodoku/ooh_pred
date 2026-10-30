@@ -1,0 +1,36 @@
+Package: oohresearch
+Title: Recorded Out of Home Placement in the PerformCare Extract
+Version: 0.1.0
+Authors@R: person("Gaurav", "Sood", role = c("aut", "cre"), email = "gsood07@gmail.com")
+Description: Reproducible analysis of an unpublished study of recorded behavioral
+    health placements, repeat placements, and occupied days in a selected cohort.
+License: file LICENSE
+Encoding: UTF-8
+URL: https://github.com/soodoku/ooh_pred
+BugReports: https://github.com/soodoku/ooh_pred/issues
+Depends: R (>= 4.6.0)
+Imports:
+    boot,
+    digest,
+    dplyr,
+    ggplot2,
+    glmnet,
+    Hmisc,
+    janitor,
+    kableExtra,
+    knitr,
+    lubridate,
+    mlr3measures,
+    parallel,
+    pROC,
+    qpdf,
+    readr,
+    rmarkdown,
+    rsample,
+    scales,
+    tibble,
+    tidyr,
+    lintr,
+    renv,
+    styler,
+    testthat

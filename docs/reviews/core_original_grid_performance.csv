@@ -1,0 +1,6 @@
+metric,estimate,lower,upper,valid_draws,draws,setting,outcome,horizon_days,n_train,n_test,events,threshold,lambda
+rmse,85.12811971487989,NA,NA,NA,NA,core,recorded_days,672,12260,3066,NA,NA,0.001
+mae,43.37870462172073,NA,NA,NA,NA,core,recorded_days,672,12260,3066,NA,NA,0.001
+mean_baseline_rmse,91.06109321446677,NA,NA,NA,NA,core,recorded_days,672,12260,3066,NA,NA,0.001
+median_baseline_mae,25.479778212654804,NA,NA,NA,NA,core,recorded_days,672,12260,3066,NA,NA,0.001
+mse_improvement,0.12606252576905363,NA,NA,NA,NA,core,recorded_days,672,12260,3066,NA,NA,0.001

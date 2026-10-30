@@ -1,0 +1,58 @@
+**Verdict:** I found one serious problem with the outcome data, two moderate defects in how results are compared and how uncertainty is reported, and a few minor issues. The leakage, person-split, fold-preprocessing and row-alignment code all check out.
+
+**What I actually ran:**
+- **Code read:** all four files, plus `R/data.R`, `scripts/config.R` and the admissions block of `scripts/prepare.R`.
+- **Existing output:** the window table `tabs/rolling_windows.csv` and the date-range tables. `tabs/rolling_performance.csv` doesn't exist yet, so I couldn't check any metrics.
+- **Real data:** summary counts only from the prepared admissions, no individual records.
+- **Synthetic test:** one small fake dataset run through the window, snapshot and label functions.
+
+## Findings, by priority
+
+**1. High: test outcomes go missing at later dates, so trends over time can't be read as changes in model performance.**
+`prepare.R` requires every admission to have a discharge date (`stopifnot(!anyNA(discharge_date))`). So the extract only contains stays that had ended when the data were pulled; anyone still in placement is absent. Recorded starts per quarter from the real data:
+
+| 2014Q1–2015Q3 | 2015Q4 | 2016Q1 | 2016Q2 | 2016Q3 |
+|---|---|---|---|---|
+| 270–413 | 204 | 174 | 101 | 70 |
+
+The median stay is 255 days and the 90th percentile is 518. That decline is what you'd expect if late-starting long stays are missing, though a real fall in placements could also contribute. I can't separate the two from this extract.
+
+Why it matters:
+- The test windows for Oct 2015, Jan 2016 and Apr 2016 fall in the thin period. All three `outcome_365` windows run into 2016 (to Mar, Jun and Sep).
+- Each matching training window ends about eight months earlier and is far more complete.
+- So at later dates the training and test outcomes mean different things. Test labels increasingly mean "a stay that started *and ended* before the extract," which skews toward short stays.
+- Prevalence, mean predicted risk versus prevalence, the Brier score against the training-prevalence benchmark, and probably AUC will all drift for this reason alone. Your plan to "describe temporal transport" would attribute that drift to the model or the population.
+- Predictors are affected too. A prior start in the lookback whose stay was still open at extraction is missing. That means the predictor depends on an event after the cutoff (the discharge), and youth who are in care at the cutoff look like they have no placement history.
+
+The design doc mentions this limitation but not its size. Suggested fix: add a column for recorded starts per test window, and treat dates whose outcome window ends within about one 90th-percentile stay of the extract as label-censored. That flag would cover the 2016-dated test windows and all of `outcome_365`.
+
+**2. Medium: the sensitivity settings are compared over different calendar dates.**
+`outcome_365` keeps only three dates (Apr, Jul and Oct 2015); the other settings keep six. Its test windows also run latest, into the most censored period. Any comparison of settings mixes the setting with the calendar. Compare settings on the dates they share.
+
+**3. Medium: the uncertainty reporting doesn't support the planned comparison.**
+- **No paired interval for model versus benchmark.** `rolling_metrics` puts `brier` and `baseline_brier` into separate percentile intervals, so the bootstrap never gives you an interval for "did the model beat the benchmark?" Compute the difference (or 1 − brier/baseline) inside the bootstrap statistic so both come from the same resample.
+- **Too few events allowed.** `scripts/rolling.R:82` accepts as few as two held-out events. With that few, AUC and PR-AUC intervals are close to meaningless, and resamples with zero events are silently dropped (`na.rm = TRUE`). Report events and `valid_draws` next to every interval, and suppress or flag intervals below a set event count.
+- **Labelling.** The intervals hold the fitted model fixed and only resample test youth, so they ignore training variability. That matches the design, but label them that way in the tables.
+
+**4. Low: training and test labels apply different recording rules.**
+Training labels count only admissions entered before C; test labels count all. In the data, 3.6% of admissions were entered more than 30 days after the start and 1% more than 56 days, so the effect is small. Report the existing `late_training_positives` column next to the results.
+
+**5. Low: overlap with the main analysis.**
+The rolling split uses seed `seed + 100`, so many of its held-out youth were development youth in the fixed-origin analysis. That isn't leakage into the rolling fits. But the design was written after the fixed-origin results had been seen, so "held out" applies only within the rolling exercise. State that.
+
+**6. Low, already in the design doc:**
+- Eligibility entries are dated by start date, and some may have been entered after the cutoff.
+- Youth missing from `member_mob.txt` fall out of both sides of the split without a warning.
+- `renv` reports the project as out of sync, so check package versions before the final run.
+
+## Checked and found correct
+- **Window arithmetic.** In both the window table and a synthetic run, T − U = horizon + gap + 30 days, and the training outcome window ends exactly 30 days before C.
+- **Snapshot cutoffs** (synthetic run):
+  - A CANS assessment submitted after the cutoff is excluded.
+  - A prior admission entered after the cutoff is excluded.
+  - An admission during the lead gap counts as neither a predictor nor the outcome.
+  - A record created after the cutoff is excluded.
+- **Person split.** The two sides are disjoint (asserted, and logged per window). There is one row per youth per fit (`anyDuplicated`), and folds are stratified by outcome.
+- **Fold preprocessing.** Median imputation, missing-value indicators and the record vocabulary are all built from the development rows of each internal fold. Test youth's records are present in the record table but excluded from vocabulary building by the member filter. CANS scoring is per assessment, with no statistics computed over the whole dataset.
+- **Row alignment.** Outcomes are built in the same member order as the feature rows, predictions carry `member_id`, and there are no missing outcomes.
+- **No selecting on results.** All windows and settings are written out, and failing a check stops the whole run rather than quietly dropping a window.

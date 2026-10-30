@@ -1,0 +1,10 @@
+field,first,last
+Admission,2011-01-03,2016-11-02
+Discharge,2007-07-21,2016-11-29
+CANS submitted,2012-03-01,2016-11-29
+CANS finish,2012-03-01,2023-01-05
+Claims service start,2008-11-25,2016-12-16
+Claims service end,2008-11-25,2061-04-01
+Claims creation,2016-02-01,2016-07-18
+Claims payment,2016-02-03,2016-07-20
+Medication creation,2012-11-14,2017-10-16

@@ -1,0 +1,328 @@
+---
+title: "Predicting Out of Home Placement"
+subtitle: "Supplementary information: forecast windows and rolling evaluation"
+author: "ODH"
+bibliography: references.bib
+link-citations: true
+output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+    number_sections: false
+    fig_caption: true
+  html_document:
+    self_contained: true
+    number_sections: false
+    toc: true
+fontsize: 11pt
+geometry: margin=1in
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{float}
+  - \usepackage{placeins}
+  - \usepackage{caption}
+  - \captionsetup{font=small,labelfont=bf}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE,
+  fig.width = 6.5, fig.height = 4, out.width = "100%", fig.pos = "H"
+)
+source("scripts/config.R")
+performance <- readr::read_csv("tabs/rolling_performance.csv", show_col_types = FALSE)
+checks <- readr::read_csv("tabs/rolling_checks.csv", show_col_types = FALSE)
+windows <- readr::read_csv("tabs/rolling_windows.csv", show_col_types = FALSE)
+main <- dplyr::filter(performance, setting == "rolling_main")
+main_checks <- dplyr::filter(checks, setting == "rolling_main")
+number <- function(x, digits = 0) formatC(x, digits = digits, format = "f", big.mark = ",")
+pct <- function(x, digits = 1) paste0(number(100 * x, digits), "%")
+setting_labels <- c(
+  rolling_main = "365-day history, 30-day gap, 180-day outcome",
+  history_180 = "180-day history", gap_zero = "No lead gap",
+  outcome_90 = "90-day outcome", outcome_365 = "365-day outcome"
+)
+```
+
+# Calendar-year 2015 endpoint
+
+The decline in recorded admissions during 2016 raises a question about the longer outcome window. We therefore repeat the fixed-origin analysis using admissions from January 1 through December 31, 2015. The information cutoff remains January 1, 2015, with no lead gap. The same youth remain in development and testing, and the predictor histories are unchanged. Models are refitted and tuned within development for the one-year outcome. This comparison changes the outcome window, not the cohort.
+
+```{r annual-results, results='asis'}
+fixed <- readr::read_csv("tabs/performance.csv", show_col_types = FALSE)
+targeting <- readr::read_csv("tabs/targeting.csv", show_col_types = FALSE)
+horizon <- readr::read_csv("tabs/horizon_targeting.csv", show_col_types = FALSE)
+horizon_100 <- dplyr::filter(horizon, capacity == 100)
+annual <- dplyr::filter(fixed, setting == "days_365", outcome == "placement")
+annual_value <- function(metric_name) annual$estimate[annual$metric == metric_name]
+yield_value <- function(metric_name, setting_name = "days_365", capacity_n = 100) {
+  targeting |>
+    dplyr::filter(setting == setting_name, capacity == capacity_n, metric == metric_name) |>
+    dplyr::pull(estimate)
+}
+yield_interval <- function(metric_name) {
+  x <- dplyr::filter(targeting, setting == "days_365", capacity == 100, metric == metric_name)
+  paste0(number(x$estimate), " (95% CI ", number(x$lower), " to ", number(x$upper), ")")
+}
+x <- fixed |>
+  dplyr::filter(
+    setting %in% c("main", "days_365"), outcome == "placement",
+    metric %in% c("roc_auc", "pr_auc", "brier", "prevalence")
+  ) |>
+  dplyr::mutate(
+    Window = dplyr::if_else(setting == "main", "Through Nov. 2, 2016", "Calendar year 2015"),
+    Measure = dplyr::recode(metric,
+      roc_auc = "ROC AUC", pr_auc = "PR AUC",
+      brier = "Brier score", prevalence = "Placement frequency"
+    ),
+    Result = dplyr::if_else(metric == "prevalence", pct(estimate),
+      sprintf("%.3f [%.3f, %.3f]", estimate, lower, upper)
+    )
+  ) |>
+  dplyr::select(Measure, Window, Result) |>
+  tidyr::pivot_wider(names_from = Window, values_from = Result)
+paper_table(x, paste(
+  "Placement prediction with a common January 1, 2015 origin and different endpoints.",
+  "Both models are evaluated on the same test youth. Brackets give conditional 95%",
+  "bootstrap intervals for each estimate, not for differences between windows."
+))
+```
+
+Among the `r number(annual$n_test[1])` test youth, `r number(annual$events[1])` have a recorded admission during 2015 (`r pct(annual_value("prevalence"))`). ROC AUC is `r number(annual_value("roc_auc"), 3)` and precision-recall AUC is `r number(annual_value("pr_auc"), 3)`. The top 100 one-year model scores identify `r number(yield_value("full_events"))` youth with a 2015 admission, compared with `r number(yield_value("random_events"), 1)` expected under random selection, `r number(yield_value("history_events"))` using the prior-placement rule, and `r number(yield_value("core_events"))` using CANS and demographics. The paired gain over the history rule is `r yield_interval("gain_history")` youth.
+
+```{r annual-capacity, results='asis'}
+x <- targeting |>
+  dplyr::filter(
+    setting == "days_365", metric %in% c("full_events", "core_events", "history_events", "random_events")
+  ) |>
+  dplyr::select(capacity, metric, estimate) |>
+  tidyr::pivot_wider(names_from = metric, values_from = estimate) |>
+  dplyr::transmute(
+    `Youth selected` = capacity, `Full model` = number(full_events),
+    `CANS + demographics` = number(core_events), `Prior placement rule` = number(history_events),
+    `Random: expected` = number(random_events, 1)
+  )
+paper_table(x, paste(
+  "Youth with at least one recorded admission during calendar year 2015 among equally sized",
+  "selected groups. Rankings use pre-2015 information; model tuning uses only development youth."
+))
+```
+
+At a smaller capacity of 50 youth, the history rule finds `r number(yield_value("history_events", capacity_n = 50))` youth with a 2015 placement and the full model finds `r number(yield_value("full_events", capacity_n = 50))`. The model’s relative yield therefore depends on assessment capacity.
+
+The comparison changes both the outcome and the fitted score. To separate these changes, we also keep the longer-window model's ranking fixed and count only 2015 admissions. Its top 100 contains `r number(horizon_100$estimate[horizon_100$metric == "frozen_events"])` youth with a 2015 admission, compared with `r number(horizon_100$estimate[horizon_100$metric == "annual_events"])` for the one-year model. The paired difference is `r number(horizon_100$estimate[horizon_100$metric == "gain_retuning"])` youth (95% CI `r number(horizon_100$lower[horizon_100$metric == "gain_retuning"])` to `r number(horizon_100$upper[horizon_100$metric == "gain_retuning"])`). The longer-window model thus retains ranking information for the 2015 outcome. Refitting does not improve yield at every capacity, as the following comparison shows.
+
+```{r frozen-horizon, results='asis'}
+x <- horizon |>
+  dplyr::mutate(result = dplyr::if_else(metric == "gain_retuning",
+    sprintf("%.0f [%.0f, %.0f]", estimate, lower, upper), number(estimate)
+  )) |>
+  dplyr::select(capacity, metric, result) |>
+  tidyr::pivot_wider(names_from = metric, values_from = result) |>
+  dplyr::rename(
+    `Youth selected` = capacity, `One-year score` = annual_events,
+    `Longer-window score` = frozen_events, `Gain from refitting [95% CI]` = gain_retuning
+  )
+paper_table(x, paste(
+  "Youth with a 2015 admission identified by the annual and longer-window models.",
+  "Both use the same test youth and annual outcomes. Brackets give paired conditional",
+  "95% bootstrap intervals for annual minus longer-window yield."
+))
+```
+
+These results do not establish an optimal forecast horizon. The one-year outcome window falls within the period used to select the cohort, so moving the endpoint earlier does not resolve outcome-dependent selection. An earlier endpoint also does not guarantee complete admission coverage.
+
+# Rolling forecasts: question and timing
+
+Can a model fitted to an earlier period predict recorded admissions for other youth at a later date? We examine this question by moving the observation and outcome windows forward through the extract. This supplements the main report's fixed-origin analysis. It remains an analysis of recorded admissions in the selected PerformCare cohort.
+
+Three time intervals define each forecast:
+
+- **History:** records from the 365 days before the information cutoff.
+- **Lead gap:** 30 days between the cutoff and the start of the outcome window.
+- **Outcome window:** any recorded admission start during the next 180 days.
+
+The information cutoff is the date when the prediction could be made from the retained records. It is not necessarily the date of the youth's last assessment. For example, the first outcome window begins on `r format(min(main$target_start), "%B %d, %Y")`; its information cutoff is `r format(min(main$cutoff), "%B %d, %Y")`. An admission during the lead gap is not part of the target and does not enter the predictors. We do not remove youth because they had such an admission. The question concerns any recorded admission start during the target window, whether first or subsequent; it is not readmission after discharge.
+
+A six-month outcome window is a useful planning question to examine, not an empirically established optimum. @taquet2025 used a 180-day measurement period to predict psychiatric hospitalization over the following 180 days. In a pediatric inpatient setting, @poweleit2026 evaluated psychiatric readmission within 30, 90, and 180 days after discharge. These studies concern different populations and outcomes. They motivate examining shorter windows but do not validate a particular horizon or a 30-day gap for the PerformCare cohort. Here, a year of history allows more time for intermittent assessments; the lead gap tests whether useful signal remains with advance notice. We also examine a 180-day history, no gap, and 90- and 365-day outcome windows, changing one quantity at a time.
+
+```{r timing-figure, fig.cap="First default rolling forecast. Each row uses 365 days of history, a 30-day lead gap and a 180-day outcome window. The earlier training outcome window ends 30 days before the dotted line, the information cutoff for the later forecast. Development and test rows represent disjoint groups of youth."}
+knitr::include_graphics(normalizePath("figs/rolling_timeline.png"))
+```
+
+# Earlier training and later evaluation
+
+We divide youth listed in the member roster into development and test groups once, without using their outcomes. CANS records for youth absent from that roster do not enter this rolling analysis. We randomly assign 80% to development. A youth remains on the same side at every date. This exploratory analysis uses a separate person-level split. At each quarterly target start, the model is trained on an earlier snapshot of development youth and evaluated on a later snapshot of test youth. Eligibility at each snapshot requires a CANS assessment finished in its history window and created and submitted before its cutoff. Eligibility and sample sizes can therefore change across dates and specifications.
+
+The earlier training outcome window ends 30 days before the later information cutoff. This additional interval allows some time for admission records to be entered. Only training admissions with creation dates before that later cutoff count as positive training labels. The buffer does not guarantee that all admissions have been recorded. Evaluation uses recorded admission starts within the later target window.
+
+```{r window-table, results='asis'}
+x <- main_checks |>
+  dplyr::transmute(
+    `Training outcomes begin` = train_start,
+    `Training outcomes end*` = train_end,
+    `Information cutoff*` = cutoff,
+    `Target begins` = target_start, `Target ends*` = target_end
+  )
+paper_table(x, paste(
+  "Rolling schedule for the 365-day history, 30-day gap, and 180-day outcome specification.",
+  "Asterisks mark exclusive boundaries: dates on or after a cutoff or endpoint are excluded."
+))
+```
+
+Predictors include CANS module averages and assessment counts, demographics with age at each cutoff, recent diagnosis, medication and eligibility records, and the number and recency of prior recorded admission starts. CANS assessment finish dates must fall within the history window, with finish, creation and submission all before the cutoff. Diagnosis and medication entries use creation dates; eligibility uses start dates because entry dates are unavailable. Prior admissions must start within the history window and have been entered before the cutoff. These features describe recorded histories, not confirmed active diagnoses, medication use, eligibility or complete placement histories. Later demographic snapshots and unavailable record versions remain limitations.
+
+We fit logistic lasso models [@friedman2010]. Each training snapshot has one observation per youth. Five-fold outcome-stratified cross-validation selects the penalty by log loss; category selection, imputation, missingness indicators and constant-column removal are repeated within each training fold. Models are then refitted on all development youth at that earlier date. Test youth never enter training, preprocessing or tuning. Each forecast uses one earlier training snapshot; the windows slide rather than accumulating all earlier observations.
+
+We retain target windows ending no later than November 2, 2016, the last recorded admission date. We require the earlier training history to begin no earlier than November 14, 2012, the first medication creation date. This excludes the January 2015 target for the 365-day outcome specification; its final feasible target is October 2015. The date restriction avoids mechanically using a history preceding that source, but does not establish complete observation for each youth.
+
+# Results by forecast date
+
+Across the default forecasts, ROC AUC ranges from `r number(min(main$estimate[main$metric == "roc_auc"]), 3)` to `r number(max(main$estimate[main$metric == "roc_auc"]), 3)`. The fraction of test youth with a recorded admission declines from `r pct(main$estimate[main$metric == "prevalence"][1])` in the first target window to `r pct(tail(main$estimate[main$metric == "prevalence"], 1))` in the last. Mean predicted risk exceeds observed admission frequency at `r sum(main$estimate[main$metric == "mean_prediction"] > main$estimate[main$metric == "prevalence"])` of the `r nrow(main_checks)` dates. Ranking performance therefore does not imply that the predicted probabilities are well calibrated to these later recorded outcomes.
+
+```{r main-performance, results='asis'}
+x <- main |>
+  dplyr::filter(metric %in% c("roc_auc", "pr_auc", "prevalence")) |>
+  dplyr::mutate(result = dplyr::if_else(metric == "prevalence", pct(estimate),
+    sprintf("%.3f [%.3f, %.3f]", estimate, lower, upper)
+  )) |>
+  dplyr::select(target_start, n_train, n_test, events, metric, result) |>
+  tidyr::pivot_wider(names_from = metric, values_from = result) |>
+  dplyr::rename(
+    `Target begins` = target_start, `Training youth` = n_train,
+    `Test youth` = n_test, Events = events, `ROC AUC` = roc_auc,
+    `PR-AUC` = pr_auc, Prevalence = prevalence
+  )
+paper_table(x, paste(
+  "Later-period discrimination for the default rolling specification. Brackets give",
+  "conditional 95% percentile bootstrap intervals from 1,000 resamples of test youth within",
+  "each forecast date."
+), digits = 0)
+```
+
+```{r probability-performance, results='asis'}
+x <- main |>
+  dplyr::filter(metric %in% c("brier", "baseline_brier", "prevalence", "mean_prediction")) |>
+  dplyr::mutate(result = dplyr::if_else(
+    metric %in% c("prevalence", "mean_prediction"), pct(estimate), number(estimate, 4)
+  )) |>
+  dplyr::select(target_start, metric, result) |>
+  tidyr::pivot_wider(names_from = metric, values_from = result) |>
+  dplyr::rename(
+    `Target begins` = target_start, `Lasso Brier` = brier,
+    `Constant Brier` = baseline_brier, `Observed admissions` = prevalence,
+    `Mean predicted risk` = mean_prediction
+  )
+paper_table(x, paste(
+  "Probability accuracy and average risk. The constant comparator predicts the earlier",
+  "training prevalence for every test youth; smaller Brier scores indicate better probability",
+  "accuracy."
+))
+```
+
+```{r recency-table, results='asis'}
+x <- main_checks |>
+  dplyr::transmute(
+    `Target begins` = target_start,
+    `Days since last CANS: median [IQR]` = paste0(
+      number(assessment_lag_median), " [",
+      number(assessment_lag_q25), ", ", number(assessment_lag_q75), "]"
+    ),
+    `Training positives unavailable at cutoff` = late_training_positives
+  )
+paper_table(x, paste(
+  "Assessment timing among test youth, measured from assessment finish to target start. The",
+  "last column counts youth whose training outcome would become positive only using later-",
+  "entered admissions."
+), digits = 0)
+```
+
+```{r brier-gain, results='asis'}
+x <- main |>
+  dplyr::filter(metric == "brier_gain") |>
+  dplyr::transmute(
+    `Target begins` = target_start,
+    `Brier improvement [95% CI]` = sprintf("%.5f [%.5f, %.5f]", estimate, lower, upper)
+  )
+paper_table(x, paste(
+  "Paired probability-accuracy comparison. Improvement is constant-risk Brier score minus",
+  "lasso Brier score on the same test youth; positive values favor the lasso."
+))
+```
+
+A 30-day lead gap is a minimum separation from the information cutoff, not the age of the last available clinical assessment. Across the default forecasts, median time from the last CANS assessment to target start ranges from `r number(min(main_checks$assessment_lag_median))` to `r number(max(main_checks$assessment_lag_median))` days. The recency table shows how much earlier assessments actually occurred. The probability table also distinguishes ranking from calibration: good discrimination can coexist with predicted risks that exceed the frequency of recorded admissions.
+
+# Outcome coverage
+
+Every admission in the supplied file has a discharge date. This does not establish whether the extraction query excluded ongoing stays, but it makes complete late-period ascertainment uncertain. The table shows both the decline in recorded starts and the distribution of recorded stay lengths by admission year. These are counts within a cohort selected through service involvement during 2014–2015. The files do not enumerate all youth served in later years or establish how long each remained under observation. Consequently, the counts do not estimate a system-wide admission rate.
+
+```{r ascertainment, results='asis'}
+x <- readr::read_csv("tabs/admission_ascertainment.csv", show_col_types = FALSE) |>
+  dplyr::transmute(
+    Year = as.character(year), `Recorded starts` = recorded_starts,
+    `Valid durations` = valid_durations, `Median days` = median_stay, `90th percentile days` = p90_stay
+  )
+paper_table(x, paste(
+  "Recorded admission starts and episode durations by admission year in the full extract.",
+  "Invalid negative durations are excluded only from duration summaries. The last year ends",
+  "on November 2, 2016."
+), digits = 0)
+```
+
+The sampling descriptions consistently anchor selection to 2014–2015, but differ on whether qualifying placements began in those years or overlapped them. Such a cohort need not have stable service exposure in 2016: youth may leave services, age out, or have fewer subsequent admissions. A second possible mechanism is exclusion of unfinished stays. Under that mechanism, later starts would be observed preferentially when stays are short. Recorded stays beginning in 2016 are shorter than those beginning in 2014 or 2015, which is consistent with this mechanism but does not establish it. A real change in service use could also contribute. The available extraction documentation and records cannot identify how much of the decline comes from each source.
+
+```{r target-coverage, results='asis'}
+x <- main_checks |>
+  dplyr::transmute(
+    `Target begins` = target_start, `Target ends (exclusive)` = target_end,
+    `Recorded starts in full extract` = recorded_starts_in_target,
+    `Days remaining in discharge record` = days_after_target_to_last_discharge
+  )
+paper_table(x, paste(
+  "Observed coverage of default target windows. The final column measures time from the",
+  "exclusive target endpoint to the day after the last recorded discharge; it is not verified",
+  "follow-up."
+), digits = 0)
+```
+
+The first three default target windows end during 2015. They provide an earlier-period view of the results, although they are still drawn from the selected cohort. An earlier endpoint does not guarantee complete admission coverage.
+
+# Alternative histories, gaps and outcome windows
+
+```{r alternatives, results='asis'}
+for (setting_name in names(setting_labels)[-1]) {
+  cat("\n\n## ", setting_labels[[setting_name]], "\n\n", sep = "")
+  x <- performance |>
+    dplyr::filter(setting == setting_name, metric %in% c("roc_auc", "pr_auc", "brier", "prevalence")) |>
+    dplyr::mutate(result = dplyr::case_when(
+      metric == "prevalence" ~ pct(estimate),
+      metric == "brier" ~ number(estimate, 4),
+      TRUE ~ sprintf("%.3f [%.3f, %.3f]", estimate, lower, upper)
+    )) |>
+    dplyr::select(target_start, n_test, events, metric, result) |>
+    tidyr::pivot_wider(names_from = metric, values_from = result) |>
+    dplyr::rename(
+      `Target begins` = target_start, `Test youth` = n_test, Events = events,
+      `ROC AUC` = roc_auc, `PR-AUC` = pr_auc, Brier = brier, Prevalence = prevalence
+    )
+  print(paper_table(x, paste0(setting_labels[[setting_name]], paste(
+    "; other timing choices retain their default values. Brackets give conditional 95%",
+    "bootstrap intervals."
+  )), digits = 0, label = setting_name))
+  cat("\n\n")
+}
+```
+
+# Interpretation
+
+These comparisons examine temporal transport within the supplied cohort. They do not establish prospective performance in the service population. The cohort was selected through service involvement during 2014–2015, and the extract may omit ongoing placements. The decline in recorded admissions during 2016 can therefore reflect how the files were assembled as well as changes in utilization. Moving the windows does not repair those limitations.
+
+The smallest test event count across specifications is `r min(performance$events)`; short-window estimates based on few admissions should be read with their uncertainty and denominators.
+
+The same test youth can contribute at several forecast dates, and outcome windows overlap. Results are reported separately by date; they are not pooled as independent observations. Intervals condition on each fitted model and split and omit uncertainty from training, record availability, cohort selection and family or provider dependence. Differences across specifications can also reflect changing eligible youth. All five specifications share the April, July and October 2015 target dates; the 365-day outcome has no results for the other dates. Comparisons across horizons must retain this calendar distinction and the different outcome definitions.
+
+# References
+
+::: {#refs}
+:::

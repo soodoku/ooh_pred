@@ -1,0 +1,477 @@
+---
+title: "Predicting Out of Home Placement"
+subtitle: "A research report on recorded behavioral health placements"
+author: "ODH"
+bibliography: references.bib
+link-citations: true
+output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+    number_sections: true
+    fig_caption: true
+  html_document:
+    self_contained: true
+    number_sections: true
+    toc: true
+fontsize: 11pt
+geometry: margin=1in
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{float}
+  - \usepackage{placeins}
+  - \usepackage{caption}
+  - \captionsetup{font=small,labelfont=bf}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE,
+  fig.width = 6.5, fig.height = 4, out.width = "100%", fig.pos = "H"
+)
+source("scripts/config.R")
+performance <- readr::read_csv("tabs/performance.csv", show_col_types = FALSE)
+audit <- readr::read_csv("tabs/audit_counts.csv", show_col_types = FALSE)
+date_ranges <- readr::read_csv("tabs/date_ranges.csv", show_col_types = FALSE)
+relationships <- readr::read_csv("tabs/descriptive_relationships.csv", show_col_types = FALSE)
+medications <- readr::read_csv("tabs/medication_descriptive.csv", show_col_types = FALSE)
+group_risk <- function(variable_name, group_name) {
+  relationships$risk[relationships$variable == variable_name & relationships$group == group_name]
+}
+targeting <- readr::read_csv("tabs/targeting.csv", show_col_types = FALSE)
+thresholds <- readr::read_csv("tabs/threshold_counts.csv", show_col_types = FALSE)
+placement_threshold <- dplyr::filter(thresholds, outcome == "placement")
+yield_value <- function(metric_name, capacity_n = 100, setting_name = "main") {
+  targeting |>
+    dplyr::filter(setting == setting_name, capacity == capacity_n, metric == metric_name) |>
+    dplyr::pull(estimate)
+}
+yield_interval <- function(metric_name, capacity_n = 100) {
+  x <- dplyr::filter(targeting, setting == "main", capacity == capacity_n, metric == metric_name)
+  paste0(number(x$estimate), " (95% CI ", number(x$lower), " to ", number(x$upper), ")")
+}
+primary_days <- as.numeric(end - origin)
+characteristics <- readr::read_csv("tabs/member_characteristics.csv", show_col_types = FALSE)
+characteristic <- function(name) characteristics$value[match(name, characteristics$variable)]
+cohort <- readr::read_csv("tabs/cohort.csv", show_col_types = FALSE)
+count <- function(name) audit$value[match(name, audit$quantity)]
+number <- function(x, digits = 0) formatC(x, digits = digits, format = "f", big.mark = ",")
+pct <- function(x, digits = 1) paste0(number(100 * x, digits), "%")
+value <- function(outcome, metric, setting = "main") {
+  performance$estimate[performance$outcome == outcome & performance$metric == metric & performance$setting == setting]
+}
+interval <- function(outcome, metric) {
+  row <- performance[performance$outcome == outcome & performance$metric == metric & performance$setting == "main", ]
+  paste0(number(row$estimate, 2), " (95% CI ", number(row$lower, 2), " to ", number(row$upper, 2), ")")
+}
+main <- dplyr::filter(performance, setting == "main")
+brier_skill <- readr::read_csv("tabs/brier_skill.csv", show_col_types = FALSE)
+comparison <- readr::read_csv("tabs/split_comparison.csv", show_col_types = FALSE)
+skill_interval <- function(outcome) {
+  x <- brier_skill[brier_skill$outcome == outcome, ]
+  paste0(pct(x$estimate, 1), " (95% CI ", pct(x$lower, 1), " to ", pct(x$upper, 1), ")")
+}
+better <- function(outcome, metric) {
+  comparison$full_better[comparison$outcome == outcome & comparison$metric == metric]
+}
+date_label <- function(x) sub(" 0", " ", format(as.Date(x), "%B %d, %Y"), fixed = TRUE)
+```
+
+# Abstract {.unnumbered}
+
+Can administrative and clinical records help target limited assessment capacity toward youth likely to enter behavioral health out-of-home care? We study `r number(cohort$n[2])` New Jersey youth with pre-2015 Child and Adolescent Needs and Strengths (CANS) assessments in a PerformCare cohort selected through service involvement during 2014–2015. We use assessments, demographics, diagnoses, medications, and eligibility records dated before January 1, 2015 to predict recorded admission starts through November 2, 2016, a `r number(primary_days)`-day window with no lead gap. Lasso models are tuned within an 80% development sample and evaluated on held-out youth. Among the `r number(main$n_test[main$outcome == "placement"][1])` test youth, selecting the 100 highest scores identifies `r number(yield_value("full_events"))` youth with a recorded placement, compared with `r number(yield_value("random_events"), 1)` expected under random selection, `r number(yield_value("history_events"))` using prior placement history, and `r number(yield_value("core_events"))` using CANS and demographics alone. The top 100 captures `r pct(yield_value("recall"))` of test youth with a placement; the gain over the history rule is `r yield_interval("gain_history")` youth. At the same 100-youth capacity, a calendar-year 2015 analysis also finds higher observed yield than these comparators. The model concentrates recorded placement risk, but its incremental value over a simple history rule at this capacity is uncertain. These are gains in case finding, not estimates of placements prevented or welfare improved. Retrospective cohort selection and uncertain admission completeness limit prospective interpretation.
+
+# Introduction
+
+What are the factors associated with a youth being placed Out Of Home (OOH)? What explains how long a youth will be placed OOH? And what are the factors associated with a youth being readmitted to OOH? We approach these questions through recorded placements, multiple starts, and occupied days within a fixed window, rather than clinical readmission or individual episode length. We use rich administrative and clinical data on `r number(cohort$n[1])` New Jersey youth from PerformCare. We have data on youths' socio-demographics, their race and ethnicity, gender, and age, etc., clinical assessments of their needs and strengths (from the Child and Adolescent Needs and Strengths or CANS assessments), diagnostic data codes (from PerformCare's internal system), and the medications that have been prescribed to them, among other such things. This rich data gives us an opportunity to understand the factors that are correlated with OOH utilization.
+
+To shed light on factors that predict a youth being placed OOH in a defined period in the future, we split the data into an observation window and a prediction window. We use information recorded before January 1, 2015 to predict recorded placements from that date through November 2, 2016, a `r number(primary_days)`-day window. We also examine multiple recorded placements during this window and recorded occupied days. Multiple placements within a fixed window are not the same as readmission following discharge, and occupied days per youth are not the length of an individual stay.
+
+Among youth held out from model development, the placement model has an area under the receiver operating characteristic curve (ROC AUC) of `r interval("placement", "roc_auc")`. Its precision-recall AUC is `r number(value("placement", "pr_auc"), 3)`, against an event prevalence of `r pct(value("placement", "prevalence"))`. These results describe discrimination within a selected historical cohort. They do not establish that the model can be applied prospectively to all youth served by the system. Cohort selection overlaps the prediction period, historical values of the retained predictors cannot all be verified, and the admission extract does not establish complete ascertainment of ongoing placements.
+
+The rest of the report is organized as follows: we begin by describing the data. We next describe how CANS and other recorded characteristics relate to OOH placement. We then use CANS, demographic, diagnostic, medication, and eligibility measures to fit separate predictive models for the three outcomes. Given the data are high-dimensional, we fit penalized models. We cross-validate the models for tuning the hyper-parameters, with feature selection and imputation repeated within each training fold. We evaluate the fitted models on held-out youth and end by discussing the limits of causal interpretation.
+
+## Related research
+
+Research on out-of-home care has examined how assessments of needs and strengths relate to placement decisions and subsequent outcomes. @chor2012 compared multidisciplinary team decisions with a CANS-based decision support algorithm for children in residential treatment in Illinois. Agreement between the two approaches was associated with greater clinical improvement, but not differences in length of stay. A subsequent longitudinal study examined agreement between these approaches across placement types and its association with changes in children’s well-being [@chor2015]. Both studies concerned children in the child welfare system.
+
+This report examines recorded behavioral health placements among New Jersey youth in the PerformCare extract. It asks whether information recorded before a common forecast date predicts subsequent placement starts and occupied days.
+
+Prediction can inform policy when a decision depends on an unknown future outcome [@kleinberg2015]. Here the decision is whom to assess first when assessment capacity is limited. We compare rankings at the same capacity and distinguish their ability to find youth with future recorded placements from the benefits of offering those youth additional services.
+
+# Data and forecasting design
+
+## Sample and ascertainment
+
+PerformCare supplied records for `r number(cohort$n[1])` youth selected through behavioral health OOH use or care management organization involvement during 2014–2015. The available sampling descriptions differ on whether qualifying OOH stays had to begin during those years or could overlap them. The cohort excludes several other settings, including developmental disability and substance use facilities, group homes, treatment homes, detoxification facilities, and SJI facilities. The outcomes here concern the behavioral health facilities represented in this extract, not every kind of out-of-home care.
+
+The sampling criteria partly use events in the prediction period. Consequently, this is a retrospectively selected cohort. Holding out people addresses fitting optimism within that cohort, but does not remove the selection or establish performance in a prospectively enumerated service population. We limit the analytic universe to youth with a pre-origin CANS assessment. The resulting analytic cohort contains `r number(cohort$n[2])` youth; assessment availability does not guarantee complete follow-up.
+
+```{r cohort-table, results='asis'}
+paper_table(dplyr::rename(cohort, Stage = stage, Youth = n),
+  "Cohort construction and recorded outcomes. Event counts use the primary window.",
+  digits = 0
+)
+```
+
+All source admission rows have discharge dates. The supplied files do not establish whether ongoing placements were excluded at extraction. We therefore predict recorded completed placements. Absence of a matching admission means no event recorded in this extract; it does not verify that the youth had no placement. This uncertainty cannot be repaired by treating the available rows as ordinary right-censored spells, because an omitted spell has no observed start in this file.
+
+Admission dates run from `r date_label(date_ranges$first[date_ranges$field == "Admission"])` to `r date_label(date_ranges$last[date_ranges$field == "Admission"])`; discharge dates extend to `r date_label(date_ranges$last[date_ranges$field == "Discharge"])`. The primary endpoint is the last recorded admission date. It defines the analysis window but is not proof of complete coverage. The window is January 1, 2015 inclusive to November 3, 2016 exclusive. Sensitivity analyses use 180 days, 365 days, and the `r number(count("last_discharge_horizon"))` calendar days through November 29, 2016. None of these windows supplies a missing ascertainment guarantee. Records with earlier event dates may have been entered later; this is retrospective outcome ascertainment.
+
+```{r admissions-figure, fig.cap="Recorded admission counts by month in the full extract. Gray shading marks the displayed period before the information cutoff; blue shading marks the admission outcome window. The dashed line is the January 1, 2015 cutoff and forecast origin, with no lead gap. The outcome window ends on November 2, 2016. History length varies by source and youth; the development/test split is across youth, not calendar periods. The late decline may reflect extraction or completion selection as well as changes in utilization; these counts do not identify a population trend."}
+knitr::include_graphics(normalizePath("figs/admissions.png"))
+```
+
+The decline in recorded starts during 2016 does not by itself demonstrate bias. These counts follow a cohort selected through service involvement in 2014–2015, rather than all youth entering the system each year. Changes in cohort composition and time spent receiving services could therefore change the counts without a comparable change in the system-wide admission rate. Exclusion of ongoing stays is another possible explanation: later admissions would have less time to end before extraction. The available records cannot distinguish these explanations from a real change in utilization. The supplementary information examines admission counts and stay lengths and repeats the fixed-origin evaluation for January 1–December 31, 2015.
+
+The PerformCare data roughly span 2011–2016. In the analytic cohort, `r pct(1 - characteristic("female"))` of youth are male and `r pct(characteristic("hispanic"))` are recorded as Hispanic or Latino. The source codes `r pct(characteristic("ethnicity_other"))` as other ethnicity; we retain that category separately from recorded non-Hispanic identity. Race is unavailable or declined for `r pct(characteristic("unknown_race"))`. Among youth with recorded race, `r pct(characteristic("white"))` are White and `r pct(characteristic("black"))` are Black. Average age at the forecast origin is `r number(characteristic("age"), 1)` years.
+
+## Outcomes
+
+**Recorded placement** indicates at least one admission start in the prediction window. It includes both first recorded placements and subsequent placements. We use the admission date directly; a missing or invalid duration does not turn an observed admission into a non-event.
+
+**Multiple recorded placements** indicates at least two distinct admission dates within the window. It describes repeated starts during a common forecasting interval. A youth with one admission in the window and an earlier admission is negative on this outcome. In the analytic cohort, `r number(count("historical_repeat_additional"))` youth have exactly this history. The records do not distinguish transfers, continuations, and returns after discharge. A clinical readmission analysis would need a discharge-based origin, a defined time at risk, and an episode-linkage rule; it is not identified by relabeling this outcome.
+
+**Recorded occupied days** counts the union of valid admission-to-discharge intervals intersecting the prediction window, including stays that began before the forecast origin. Admission days are included and discharge days excluded. Overlaps are counted once, so a youth cannot contribute more days than the window contains. There are `r number(count("carryover_stays"))` valid source stays that begin before the origin and continue into 2015. Including carryover stays and clipping durations to the endpoint measures utilization during the stated window. It is not the completed length of stay conditional on an admission.
+
+The admission file contains `r number(count("duplicate_rows"))` exact duplicate and `r number(count("negative_stays"))` records with discharge before admission. We remove the exact duplicate, retain the starts for binary placement outcomes, and mark occupied days unavailable for any cohort member with an invalid admission record starting before the endpoint, including historical records. This conservative rule does not assume that an impossible discharge date rules out a carryover stay. This excludes `r number(cohort$n[6])` youth from occupied-day modeling. We do not convert their unknown duration to zero.
+
+## Predictors and their availability
+
+CANS assessments must have finish, submission, and creation dates before January 1, 2015. This rule retains `r number(count("cans_available_cutoff"))` assessments; using finish date alone would retain `r number(count("cans_finish_cutoff"))`. CANS observations available to this analysis begin in 2012, so a uniform three-year observation period is not available for every source or youth. We use each youth's available pre-origin history rather than impose an unsupported common exposure duration.
+
+CANS measures children's needs and strengths on a variety of important dimensions. Life domain functioning is a general assessment of how the youth is doing medically, academically, vocationally, socially, etc. Youth strengths is a general psycho-social assessment, including rating questions such as whether the youth has well-developed interpersonal skills and friends. Caregiver strengths measures aspects of supervision, involvement, knowledge, organization, social resources, and residential stability. Youth risk behavior covers self-harm, delinquency, fire-setting, and related risks. The remaining modules concern acculturation, developmental needs, trauma, substance use, juvenile justice, sexual development, and sex-related problems.
+
+We average the ratings within each module, and again average the ratings over available assessments for each youth. A higher score generally denotes greater needs or fewer strengths on the source's zero-to-three coding. The caregiver and youth needs aggregate combines caregiver needs with youth behavioral and emotional needs. The sexual development and sex-related problem labels follow their item content. These are descriptive domain averages, not validated latent-scale estimates. We also include the number of qualifying pre-origin CANS assessments per youth. This records assessment frequency and may reflect duration of contact with the system as well as clinical needs.
+
+Following the assessment coding guidance, we recode special values −1 and 4 to zero for the main analysis. We preserve ordinary missing values and average observed items; an entirely unobserved module remains missing. As a sensitivity analysis, we treat −1 and 4 as missing. Zero represents no need on needs items and a strong asset on strengths items, so this recoding does not mean absence of a strength. This alternative changes the universe of scored assessments for optional modules and is not an interchangeable estimate of the same mean. Some questions were introduced later, so item availability varies by assessment date.
+
+Socio-demographics comprise age at the forecast origin, gender, and indicators for White, Black, and Hispanic or Latino identity. Birth dates are known to the month; age uses the first day of that month. Unknown or declined race remains missing rather than being coded as a known absence of a racial identity. The source ethnicity code "Other" has a separate indicator, so it is not pooled with recorded non-Hispanic identity. These characteristics come from a later member snapshot, so their historical values cannot all be verified independently.
+
+CYBER diagnostic codes and medication records must have creation dates before the origin. Eligibility records must have start dates before the origin; their entry dates are not supplied. The pre-origin CYBER data contain `r number(count("diagnosis_correct_retained"))` records. Medication records with missing or later creation dates are excluded. Source updates and the absence of version histories prevent a complete reconstruction of what every record contained on January 1, 2015.
+
+Claims provide a second source of diagnostic information. However, all supplied claims creation and payment dates are in 2016, including claims with earlier service dates. We therefore exclude claims from forecasting predictors.
+
+```{r coverage-table, results='asis'}
+x <- readr::read_csv("tabs/source_coverage.csv", show_col_types = FALSE)
+paper_table(dplyr::rename(x, Source = source, `All records` = rows, `Pre-origin records` = pre_origin),
+  paste(
+    "Source coverage. Pre-origin counts apply the stated date rules; they do not establish",
+    "historical snapshot integrity."
+  ),
+  digits = 0
+)
+```
+
+For diagnoses, medications, and eligibility we use indicators for at least one retained record. Zero means no matching pre-origin record in the extract, not confirmed absence of a condition, prescription, or entitlement. Common categories are selected using only the development data: at least 0.5% of training youth, with a minimum of 25 youth. It is recomputed in every internal training fold.
+
+# Descriptive relationships
+
+We expect youth who are placed OOH to be worse on many of the CANS dimensions than youth who are not placed OOH. For a broad but useful view, we compare the youth-level module means by recorded placement during the prediction window. These are descriptions of the full selected analytic cohort, not estimates of causal effects or a separately validated ranking of predictors.
+
+```{r cans-figure, fig.cap="Mean pre-origin CANS scores by recorded placement during the primary window, among youth with available module scores. Each point is an equally weighted mean of youth-level assessment averages. Special values −1 and 4 are recoded to zero. Higher scores generally denote greater needs or fewer strengths."}
+knitr::include_graphics(normalizePath("figs/cans.png"))
+```
+
+The comparisons use information recorded before the forecast origin. Their interpretation remains specific to the facilities and youth included in the extract. In particular, exclusion of specialized substance use and developmental disability settings can make an association with behavioral health placement differ from an association with all out-of-home care. A negative coefficient on a related measure would not establish that the condition protects against placement.
+
+Next, we track how diagnostic codes, medications, and eligibility differ between youth with and without recorded OOH placement in the prediction period. Appendix tables report member-level prevalence for common categories using the same pre-origin indicators as the models. These describe recorded histories; zero does not confirm the absence of a diagnosis, medication, or eligibility. Claims do not enter these comparisons because their availability at the forecast origin is not established.
+
+## Placement frequency across recorded characteristics
+
+Recorded placement becomes more common as life domain functioning scores indicate greater needs: `r pct(group_risk("life_functioning", "0 to <0.5"))` of youth with average scores below 0.5 have a placement in the prediction window, compared with `r pct(group_risk("life_functioning", "1 to 3"))` of those scoring at least 1. Placement is also more common among youth with prior recorded admission starts: `r pct(group_risk("prior_placements", "0"))` with none, `r pct(group_risk("prior_placements", "1"))` with one, and `r pct(group_risk("prior_placements", "2 or more"))` with two or more. Prior starts must have occurred and been entered before January 1, 2015. They describe the available history, not a complete account of earlier care.
+
+```{r relationships-figure, fig.cap="Recorded placement frequency during the primary prediction window by pre-origin characteristics. Labels give the number of youth in each group; bars are conditional 95% exact binomial intervals. CANS scores are youth-level averages; higher scores indicate greater needs or fewer strengths. Groups are descriptive, with no adjustment for other characteristics or cohort selection."}
+knitr::include_graphics(normalizePath("figs/descriptive_relationships.png"))
+```
+
+Age and assessment frequency show different patterns. Recorded placement is most common among youth aged 12 to under 16 (`r pct(group_risk("age", "12 to <16"))`), compared with `r pct(group_risk("age", "Under 12"))` under age 12 and `r pct(group_risk("age", "16 or older"))` at age 16 or older. Assessment frequency does not have a simple increasing relationship with placement. More assessments can reflect clinical needs, time in the system, or documentation practices.
+
+## Recorded medications
+
+Medication histories are part of the analysis. The figure compares eight common entries selected by their prevalence among development youth, without using their relationship with subsequent placement. For the recorded “Risperdal 1 mg” entry, prevalence is `r pct(medications$proportion_1[medications$code == "risperdal 1 mg"])` among youth with a placement during the prediction window and `r pct(medications$proportion_0[medications$code == "risperdal 1 mg"])` among those without one. Such differences can reflect the conditions for which medications were prescribed, their severity, and contact with services. They do not establish medication effects.
+
+```{r medications-figure, fig.cap="Common pre-origin medication entries by recorded placement during the primary window. Percentages use all youth in each outcome group as denominators; a youth can appear under several entries. Entries are selected and ordered by development-set prevalence. Labels abbreviate the source entries; one Risperdal dose is truncated in the source. A matching record does not establish current use, adherence or a complete medication history."}
+knitr::include_graphics(normalizePath("figs/medications.png"))
+```
+
+# Prediction models and validation
+
+Our main analyses rely on penalized regression models. For the binary placement outcomes we use logistic regression with an L1 penalty, or lasso. For occupied days we use linear regression with an L1 penalty, with predictions bounded below at zero. We rely on lasso regression for reasons to do with producing a sparse feature set. Penalized coefficients are conditional predictive associations; their raw magnitudes across differently scaled predictors are not a common importance scale.
+
+We randomly assign 80% of youth within each primary-window outcome stratum (no placement, one placement, or multiple placements) to development and the remainder to testing. The development set contains `r number(main$n_train[main$outcome == "placement"][1])` youth and the test set contains `r number(main$n_test[main$outcome == "placement"][1])`. All three outcomes and all sensitivity specifications use the same person-level split. Within development, binary-model folds are stratified by their respective outcomes. Five-fold cross-validation selects the penalty; occupied-day models also allow an unpenalized fit. Diagnosis, medication, and eligibility vocabulary selection, missingness indicators, training medians, and zero-variance filtering are fitted within each internal training fold. Binary models minimize held-out log loss; occupied-day models minimize held-out squared error. The selected specification is refitted on all development youth before predicting the test set. We fit the models in R using glmnet [@friedman2010].
+
+We report ROC AUC, precision-recall AUC, Brier score, and observed versus predicted event frequencies. Precision-recall measures complement ROC AUC by describing how often positive predictions are correct, which is especially relevant when placements are uncommon [@saito2015]. For one illustrative classification threshold, we maximize Youden's sensitivity-plus-specificity criterion using development cross-validated predictions. This threshold is fixed before testing. It is not a clinical decision rule or a recommendation about relative false-positive and false-negative costs. For probability accuracy, the baseline assigns everyone the development event rate.
+
+To evaluate limited assessment capacity, we rank test youth by predicted placement risk and select the top 50, 100, 200, or 500. We compare these lists with equally sized lists from the CANS-and-demographics model and a simple history rule: more recorded pre-origin admission starts first, then more recent starts. Prior admissions must both begin and be entered before January 1, 2015. Remaining ties are broken randomly without reference to outcomes. Random selection provides a further benchmark, with expected yield equal to capacity times test prevalence. The history rule is a transparent comparator, not an estimate of current clinical practice. Paired bootstrap intervals resample test youth and reconstruct each ranking at the same capacity; they condition on the fitted models and tie rule.
+
+For occupied days, the squared-error comparator predicts the training mean for every test youth. The absolute-error comparator predicts the training median. The median is appropriate for absolute loss, not as the optimal constant under squared loss. We use 1,000 person-level bootstrap resamples of the held-out predictions for percentile intervals. Classification rates and prevalence use exact binomial intervals conditional on their observed denominators. All intervals condition on the fitted model and split; they do not incorporate training-sample, extraction, model-selection, or population-selection uncertainty. They also do not account for dependence among youth who share a household or provider; household membership cannot be established reliably from these files.
+
+# Results
+
+## Recorded placement and multiple placements
+
+```{r binary-performance, results='asis'}
+metric_labels <- c(
+  roc_auc = "ROC AUC", pr_auc = "Precision-recall AUC", brier = "Brier score",
+  accuracy = "Accuracy", sensitivity = "Sensitivity", specificity = "Specificity", precision = "Precision"
+)
+x <- main |>
+  dplyr::filter(outcome != "recorded_days", metric %in% names(metric_labels)) |>
+  dplyr::mutate(
+    Metric = unname(metric_labels[metric]),
+    Outcome = unname(outcome_labels[outcome]),
+    Result = sprintf("%.3f [%.3f, %.3f]", estimate, lower, upper)
+  ) |>
+  dplyr::select(Metric, Outcome, Result) |>
+  tidyr::pivot_wider(names_from = Outcome, values_from = Result)
+paper_table(x, paste(
+  "Held-out performance with conditional 95% intervals: percentile bootstrap for AUCs and Brier score,",
+  "exact binomial for classification rates.",
+  "Classification uses the threshold selected within development."
+))
+```
+
+The test set contains `r number(main$events[main$outcome == "placement"][1])` youth with at least one recorded placement and `r number(main$events[main$outcome == "repeat_placement"][1])` with multiple placements. Their respective frequencies are `r pct(value("placement", "prevalence"))` and `r pct(value("repeat_placement", "prevalence"))`. Placement discrimination is `r interval("placement", "roc_auc")`; discrimination for multiple placements is `r interval("repeat_placement", "roc_auc")`.
+
+### What does selecting the top 100 deliver?
+
+Among 100 youth with the highest placement scores, `r number(yield_value("full_events"))` have at least one recorded admission during the `r number(primary_days)`-day window. Randomly selecting 100 from the same test group would find about `r number(yield_value("random_events"), 1)` such youth on average. The model therefore finds about `r number(yield_value("gain_random"))` more at the same capacity, or `r number(yield_value("lift"), 1)` times the random-selection yield. The top 100 captures `r pct(yield_value("recall"))` of the `r number(placement_threshold$events)` youth with a recorded placement. It leaves `r number(placement_threshold$events - yield_value("full_events"))` outside the list, while `r number(100 - yield_value("full_events"))` selected youth have no recorded placement.
+
+```{r capacity-performance, results='asis'}
+x <- targeting |>
+  dplyr::filter(setting == "main", metric %in% c("full_events", "core_events", "history_events", "random_events")) |>
+  dplyr::select(capacity, metric, estimate) |>
+  tidyr::pivot_wider(names_from = metric, values_from = estimate) |>
+  dplyr::transmute(
+    `Youth selected` = capacity, `Full model` = number(full_events),
+    `CANS + demographics` = number(core_events), `Prior placement rule` = number(history_events),
+    `Random: expected` = number(random_events, 1)
+  )
+paper_table(x, paste(
+  "Youth with at least one recorded placement among equally sized selected groups from the",
+  "same test sample. The outcome window is January 1, 2015 through November 2, 2016.",
+  "Each method selects its own list of youth. Random selection is an expectation;",
+  "the other columns are observed counts, not percentages or admission episodes."
+))
+```
+
+The more demanding comparison is with a simple rule based on prior placements. Its top 100 includes `r number(yield_value("history_events"))` youth with a later recorded placement, compared with `r number(yield_value("full_events"))` for the full model: a gain of `r yield_interval("gain_history")` youth. CANS and demographics alone find `r number(yield_value("core_events"))`, giving a full-model gain of `r yield_interval("gain_core")` youth. Thus, the large gain over random selection does not establish a clear improvement over the history rule at this capacity. At capacity 200, the full model finds `r number(yield_value("full_events", 200))` youth with a placement, compared with `r number(yield_value("history_events", 200))` using history: a gain of `r yield_interval("gain_history", 200)` youth. The incremental yield therefore depends on assessment capacity. These comparisons count youth with recorded placements, not the number of admission episodes or placements prevented.
+
+The development-selected classification threshold answers a different capacity question. It flags `r number(placement_threshold$flagged)` youth (`r pct(placement_threshold$flagged / placement_threshold$n_test)` of the test set), of whom `r number(placement_threshold$found)` have a placement, and misses `r number(placement_threshold$missed)` youth with a placement. Its `r pct(value("placement", "sensitivity"))` sensitivity and `r pct(value("placement", "precision"))` precision therefore require assessing far more than 100 youth. A service with a fixed assessment budget should judge the ranking at that capacity rather than adopt this threshold by default.
+
+For multiple placements, mean predicted risk is `r pct(value("repeat_placement", "mean_prediction"), 2)` and observed test prevalence is `r pct(value("repeat_placement", "prevalence"), 2)`. Development prevalence is `r pct((cohort$n[5] - main$events[main$outcome == "repeat_placement"][1]) / main$n_train[main$outcome == "repeat_placement"][1], 2)`. Stratification balances the primary-window outcome categories across development and testing; it does not guarantee calibration or address cohort selection.
+
+Relative to predicting the development event rate for everyone, the reduction in Brier score is `r skill_interval("placement")` for placement and `r skill_interval("repeat_placement")` for multiple placements. The latter interval does not establish an improvement in probability accuracy despite the model's ROC AUC. These are paired person-bootstrap intervals conditional on the fitted model and development prevalence.
+
+```{r calibration-figure, fig.cap="Calibration on held-out youth, separately for the two binary outcomes. Points compare mean predicted probability with the observed event proportion within ten equal-count prediction bins. Vertical intervals are exact 95% binomial intervals conditional on those bins; the dashed line marks equality. Axis ranges differ across outcomes to make rare-event calibration readable; the horizontal and vertical ranges match within each panel. These estimates concern the selected cohort and recorded outcomes."}
+knitr::include_graphics(normalizePath("figs/calibration.png"))
+```
+
+## Recorded occupied days
+
+```{r days-performance, results='asis'}
+labels <- c(
+  rmse = "Model RMSE (days)", mae = "Model MAE (days)",
+  mean_baseline_rmse = "Training-mean baseline RMSE (days)",
+  median_baseline_mae = "Training-median baseline MAE (days)",
+  mse_improvement = "Fractional MSE reduction versus training mean"
+)
+x <- main |>
+  dplyr::filter(outcome == "recorded_days") |>
+  dplyr::transmute(
+    Metric = unname(labels[metric]), Estimate = estimate,
+    `95% lower` = lower, `95% upper` = upper
+  )
+paper_table(x, paste(
+  "Occupied-day prediction among held-out youth with usable duration outcomes. RMSE is",
+  "root mean squared error; MAE is mean absolute error."
+))
+```
+
+The model's root mean squared error is `r number(value("recorded_days", "rmse"), 1)` days, compared with `r number(value("recorded_days", "mean_baseline_rmse"), 1)` days for the training-mean predictor. The reduction in mean squared error is `r pct(value("recorded_days", "mse_improvement"))`. Mean absolute error is `r number(value("recorded_days", "mae"), 1)` days for the model, versus `r number(value("recorded_days", "median_baseline_mae"), 1)` days for the training-median baseline. The model performs worse on absolute error despite improving squared error; the latter gives more weight to large errors. This comparison concerns total recorded occupied days during the window, including zeros for youth without recorded occupancy. It does not measure prediction of an admitted youth's eventual discharge date.
+
+## Horizon and coding sensitivity
+
+```{r sensitivity-table, results='asis'}
+setting_labels <- c(
+  main = paste0("Main: ", primary_days, " days"), core = "CANS + demographics",
+  special_missing = "Special codes missing", days_180 = "180 days",
+  days_365 = "365 days", days_699 = "699 days"
+)
+x <- performance |>
+  dplyr::filter(outcome == "recorded_days", metric %in% c("rmse", "mae", "mse_improvement")) |>
+  dplyr::mutate(
+    Setting = factor(setting, levels = names(setting_labels), labels = setting_labels),
+    Measure = dplyr::recode(metric, rmse = "RMSE (days)", mae = "MAE (days)", mse_improvement = "MSE reduction"),
+    Result = dplyr::if_else(metric == "mse_improvement",
+      sprintf("%.3f [%.3f, %.3f]", estimate, lower, upper),
+      sprintf("%.1f [%.1f, %.1f]", estimate, lower, upper)
+    )
+  ) |>
+  dplyr::select(Setting, Measure, Result) |>
+  tidyr::pivot_wider(names_from = Measure, values_from = Result) |>
+  dplyr::arrange(Setting)
+paper_table(x, paste(
+  "Occupied-day sensitivity analyses with conditional 95% bootstrap intervals.",
+  "MSE reduction is a fraction relative to the training-mean baseline. Horizon changes alter the outcome."
+))
+```
+
+```{r binary-sensitivity, results='asis'}
+for (outcome_name in c("placement", "repeat_placement")) {
+  x <- performance |>
+    dplyr::filter(outcome == outcome_name, metric %in% c("roc_auc", "pr_auc", "brier")) |>
+    dplyr::mutate(
+      Setting = factor(setting, levels = names(setting_labels), labels = setting_labels),
+      Metric = dplyr::recode(metric, roc_auc = "ROC AUC", pr_auc = "PR AUC", brier = "Brier"),
+      Result = sprintf("%.3f [%.3f, %.3f]", estimate, lower, upper)
+    ) |>
+    dplyr::select(Setting, Events = events, Metric, Result) |>
+    tidyr::pivot_wider(names_from = Metric, values_from = Result) |>
+    dplyr::arrange(Setting)
+  print(paper_table(x, paste(
+    outcome_labels[[outcome_name]],
+    "sensitivity analyses: test events and conditional 95% bootstrap intervals.",
+    "Intervals describe individual estimates, not paired differences between models."
+  ), digits = 0, label = paste0("sensitivity-", outcome_name)))
+  cat("\n\n")
+}
+```
+
+For recorded placement, the full model's ROC AUC is `r number(value("placement", "roc_auc"), 3)`, compared with `r number(value("placement", "roc_auc", "core"), 3)` for CANS and demographics alone. Precision-recall AUCs are `r number(value("placement", "pr_auc"), 3)` and `r number(value("placement", "pr_auc", "core"), 3)`, respectively; Brier scores are `r number(value("placement", "brier"), 4)` and `r number(value("placement", "brier", "core"), 4)`. These metrics assess different aspects of prediction. The paired comparisons and repeated-split analysis below assess the full-versus-reduced differences directly. The 180-day multiple-placement result rests on only `r number(performance$events[performance$setting == "days_180" & performance$outcome == "repeat_placement"][1])` test events, and the 365-day result rests on `r number(performance$events[performance$setting == "days_365" & performance$outcome == "repeat_placement"][1])`. No admissions are recorded after the primary endpoint, so extending the window to 699 days leaves both binary outcomes unchanged; it can change occupied days.
+
+The shorter horizons answer different forecasting questions, with fewer opportunities for an event. Treating special CANS values as missing changes which assessments contribute to module means. Removing diagnosis, medication, and eligibility indicators changes the predictor set. These comparisons do not test performance in a new calendar cohort or service system.
+
+## Model comparison across splits
+
+We compare the full and reduced binary models on matched test youth, then repeat the complete development, tuning, and evaluation procedure over 20 stratified splits, including the primary split. Each model uses development-only preprocessing and tuning within each split. The two models share split membership and tuning folds.
+
+```{r paired-comparison, results='asis'}
+x <- readr::read_csv("tabs/paired_comparison.csv", show_col_types = FALSE) |>
+  dplyr::mutate(
+    Outcome = dplyr::if_else(outcome == "placement", "Placement", "Multiple placements"),
+    Measure = dplyr::recode(metric, roc_auc = "ROC AUC", pr_auc = "PR AUC", brier = "Brier score"),
+    Result = dplyr::if_else(metric == "brier",
+      sprintf("%.5f [%.5f, %.5f]", estimate, lower, upper),
+      sprintf("%.4f [%.4f, %.4f]", estimate, lower, upper)
+    )
+  ) |>
+  dplyr::select(Outcome, Measure, `Full-model gain [95% CI]` = Result)
+paper_table(x, paste(
+  "Paired comparisons on the primary test split. Positive gains favor the full model:",
+  "full minus reduced for AUCs, reduced minus full for Brier score.",
+  "Intervals condition on the fitted models and split."
+))
+```
+
+```{r split-stability, results='asis'}
+x <- comparison |>
+  dplyr::mutate(
+    Outcome = dplyr::if_else(outcome == "placement", "Placement", "Multiple placements"),
+    Measure = dplyr::recode(metric, roc_auc = "ROC AUC", pr_auc = "PR AUC", brier = "Brier score"),
+    `Median gain` = dplyr::if_else(metric == "brier",
+      sprintf("%.5f", median_gain), sprintf("%.4f", median_gain)
+    ),
+    Range = dplyr::if_else(metric == "brier",
+      sprintf("[%.5f, %.5f]", min_gain, max_gain), sprintf("[%.4f, %.4f]", min_gain, max_gain)
+    ),
+    `Full better` = paste0(full_better, "/", splits)
+  ) |>
+  dplyr::arrange(
+    factor(Outcome, levels = c("Placement", "Multiple placements")),
+    factor(metric, levels = c("roc_auc", "pr_auc", "brier"))
+  ) |>
+  dplyr::select(Outcome, Measure, `Median gain`, Range, `Full better`)
+paper_table(x, paste(
+  "Full-model gains across 20 stratified splits. Positive gains favor the full model.",
+  "The range describes observed resampling variation, not a confidence interval."
+))
+```
+
+The full placement model improves ROC AUC in `r better("placement", "roc_auc")` of 20 splits, PR-AUC in `r better("placement", "pr_auc")`, and Brier score in `r better("placement", "brier")`. For multiple placements, the corresponding counts are `r better("repeat_placement", "roc_auc")`, `r better("repeat_placement", "pr_auc")`, and `r better("repeat_placement", "brier")`. Added record indicators provide more consistent gains for placement; improvements for multiple placements depend more on the metric and split.
+
+These repeated splits measure stability of the model comparison within the supplied cohort. Test sets overlap across repetitions, so the repetitions are not independent external validations. They do not correct cohort selection, incomplete ascertainment, or unavailable historical snapshots.
+
+The supplementary information examines rolling forecasts: 365 days of history, a 30-day lead gap, and a 180-day admission window, with alternative histories, gaps and outcome windows. It trains models on earlier periods and evaluates them on later snapshots of held-out youth.
+
+# Discussion
+
+With capacity to assess 100 youth, the full model identifies more youth with subsequent recorded placements than random selection. The incremental gain over prior placement history is smaller and uncertain. That comparison matters for deciding whether the added data collection, linkage, and model maintenance are worthwhile. A prospective assessment should compare equal-capacity allocation rules, including current practice, and measure the services delivered and their consequences.
+
+A higher placement probability does not imply a larger benefit from intervention. Allocating services to improve welfare requires evidence about how treatment changes outcomes and what it costs [@kitagawa2018]. These records do not identify those effects. Some placements may be appropriate and beneficial, so reducing placements is not itself a sufficient welfare objective. The present estimates establish case-finding yield within the recorded cohort; they cannot establish cost savings, placements prevented, or which youth would benefit most from additional support.
+
+The analyses that we have presented here are predictive but not causal. It is one thing to say that someone who scores poorly on "Life Domain Functioning" is likelier to be placed Out of Home, and another to say that poor "Life Domain Functioning" caused the child to be placed out of home. The difference is subtle but important. A child who scores poorly on "Life Domain Functioning" likely has a host of other problems, some diagnosed, some undiagnosed, and some not in the data. So, a positive coefficient on "Life Domain Functioning" does not mean that it is poor score on that, that is causing the child to be placed OOH. It could well be poverty or some other factor that we don't account for. The other problem that complicates inferences is that for variables that we do account for, we cannot be sure of the functional form. For all these reasons, it is important to interpret the results with caution.
+
+The analysis supports discrimination among youth in this historical cohort, subject to the recorded-outcome definition. It does not validate a discharge-time readmission score, a model for eventual episode length, or a claim that applying the scores will prevent placements. The later snapshot, unavailable extraction query, outcome-dependent sample construction, and excluded facility types constrain the interpretation independently of model performance. Bootstrap intervals quantify only conditional test-sample uncertainty; they do not resolve these design limitations.
+
+Next steps for analyses would include thinking about ways of including yet more data on the children, including how their families are doing, economically, medically, and psychologically, and what happens to children in the real world. Before prospective use, the immediate data requirements are a cohort enumerated at the forecast origin, historically available predictor snapshots, and a complete admission-and-discharge registry that retains ongoing stays. A discharge-based readmission question also requires a declared return window and a rule distinguishing transfers from new episodes.
+
+\FloatBarrier
+
+\clearpage
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
+
+\clearpage
+
+# Appendix {.unnumbered}
+
+## Recorded diagnoses, medications, and eligibility {.unnumbered}
+
+The following tables show up to eight of the most prevalent categories from each source among categories retained by the final development-set frequency rule. Ordering uses prevalence in the full analytic cohort for descriptive display; it does not feed model selection. Percentages have youth, not source records, as their denominators. Differences are percentage points, calculated as placement minus no placement. The eligibility code DYFS refers to the Division of Child Protection and Permanency. Entries such as "None Identified" and unspecified diagnostic codes are retained record categories, not confirmed conditions; they can reflect documentation practices. Medication labels are the recorded strings, which can be truncated and do not establish a harmonized drug or dose.
+
+```{r record-prevalence, results='asis'}
+features <- readr::read_csv("tabs/feature_descriptive.csv", show_col_types = FALSE)
+for (source_name in c("diagnosis", "medication", "eligibility")) {
+  x <- features |>
+    dplyr::filter(source == source_name) |>
+    dplyr::arrange(dplyr::desc(prevalence), label) |>
+    dplyr::slice_head(n = 8) |>
+    dplyr::transmute(
+      Characteristic = label, `No placement (%)` = 100 * proportion_0,
+      `Placement (%)` = 100 * proportion_1, `Difference (pp)` = 100 * difference
+    )
+  caption <- paste("Recorded", source_name, "history by placement outcome in the analytic cohort.")
+  table <- paper_table(x, caption, digits = 1, label = paste0("prevalence-", source_name))
+  if (knitr::is_latex_output()) {
+    table <- kableExtra::column_spec(table, 1, width = "6cm")
+  }
+  print(table)
+  cat("\n\n")
+}
+```
+
+## Source date ranges and missingness {.unnumbered}
+
+```{r ranges-table, results='asis'}
+x <- readr::read_csv("tabs/date_ranges.csv", show_col_types = FALSE)
+paper_table(
+  dplyr::rename(x, Field = field, First = first, Last = last),
+  paste(
+    "Observed date ranges in source files. Extremes describe the supplied values,",
+    "including errors; they do not establish coverage."
+  )
+)
+```
+
+```{r missingness-table, results='asis'}
+x <- readr::read_csv("tabs/cans_missingness.csv", show_col_types = FALSE) |>
+  dplyr::filter(year <= 2016) |>
+  dplyr::mutate(
+    year = as.character(year),
+    dplyr::across(c(rbldf_sleep, rbcrb_bulliedbyothers, rbcrb_gambling), ~ 100 * .x)
+  ) |>
+  dplyr::rename(
+    Year = year, Assessments = n, `Sleep missing (%)` = rbldf_sleep,
+    `Bullied missing (%)` = rbcrb_bulliedbyothers, `Gambling missing (%)` = rbcrb_gambling
+  )
+paper_table(x, paste(
+  "Item missingness by CANS submission year in the full extract.",
+  "Missingness varies across calendar years."
+), digits = 1)
+```

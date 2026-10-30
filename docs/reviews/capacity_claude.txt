@@ -1,0 +1,43 @@
+The capacity and 2015-endpoint analysis is computed correctly. I found two places where the prose claims more than the tables support, and one unqualified sentence in the abstract. I found no remaining implementation chatter in the outward-facing prose. No files were edited, and no IDs or row-level records were printed.
+
+## What I verified
+
+I recomputed every top-k count from `data/derived/targeting_rankings.rds` with plain base-R `order()`. This route shares no code with `capacity_metrics`.
+
+| | k=50 | 100 | 200 | 500 |
+|---|---|---|---|---|
+| Long window: full / core / history | 14/12/14 | 28/19/23 | 58/42/40 | 95/86/79 |
+| 2015 endpoint: full / core / history | 10/10/12 | 26/14/18 | 43/36/31 | 76/71/63 |
+| 2015 endpoint: frozen long-window score | 10 | **21** | **47** | **77** |
+
+- **Counts match the table.** All 32 counts in `tabs/targeting.csv` match. Random-selection expectations are 5.93 (long window) and 4.92 (2015) at k=100, and the population is 3,067 test youth with 182 and 151 events.
+- **Threshold matches.** Threshold 0.0519, 1,169 flagged, 143 found, 39 missed, as in `threshold_counts.csv`.
+- **The refitted CANS-and-demographics model is the same model.** In `scripts/targeting.R` its AUC is 0.76659, identical to the `core` row in `performance.csv`.
+- **The frozen score really is the long-window model.** It equals the main model's predictions exactly.
+- **Timing is right.** Prior starts require both admission and creation dates before 2015-01-01, and the test checks this. The 2015 outcome is bounded at `[2015-01-01, 2016-01-01)`. The 2015 events are a subset of the long-window events (31 events fall only in the long window).
+- **The history rule never falls back to random tie-breaking.** 565 test youth have a prior start, more than the largest list of 500. At k=200 the history list is exactly the 200 youth with two or more prior starts.
+- **The bootstrap is correctly paired.** Each resample of test youth re-ranks every list. Tie order is fixed, and the seed is identical across capacities. The prose (`main.Rmd:207`, `:209`) correctly says the intervals condition on the fitted models and the split. Nothing presents this as a prospective policy evaluation.
+
+## Correctness defects
+
+1. **The abstract overgeneralises the 2015 result** (`ms/main.Rmd:83`). It says "A calendar-year 2015 analysis also finds higher yield than these comparators." That is true only at k=100 (26 vs 18 and 14), and the gain over the history rule there is 8 (95% CI −2 to 16). At k=50 the history rule beats the full model (12 vs 10), and the CANS-and-demographics model ties it. The sentence needs the capacity and the uncertainty.
+
+2. **The supplement's frozen-score sentence names the wrong ranking and rests on one capacity** (`ms/supplement.Rmd:111`, fed by `scripts/targeting.R:60–71`).
+   - "The earlier endpoint therefore retains useful ranking information" credits the wrong score. The ranking that retains information is the longer-window score, held fixed and judged on 2015 admissions (21 vs 4.9 random).
+   - The horizon comparison is computed only at k=100, where refitting gains 5 (−2 to 9). At k=200 and k=500 the frozen long-window score finds more 2015 events than the refitted one-year model (47 vs 43, 77 vs 76). These are my point counts; I did not bootstrap them. So refitting to the 2015 endpoint gives no consistent advantage.
+   - Either report all four capacities or state that the comparison is k=100 only.
+
+3. **"Incremental value over the history rule is uncertain" is unqualified in the abstract** (`ms/main.Rmd:83`). It holds at k=50 (0, −7 to 8) and k=100 (5, −5 to 15). At k=200 and k=500 the intervals exclude zero: 18 (5 to 29) and 16 (2 to 31). The conclusion at `main.Rmd:400` is correctly scoped to "capacity to assess 100 youth"; the abstract should be too.
+
+## Checked and found fine
+
+- **Cohort wording** (`main.Rmd:83, 107, 109`; `supplement.Rmd:84/250`). It is consistent: selection anchored to 2014–15, with the differing start-versus-overlap descriptions stated.
+- **Ongoing stays.** The prose treats their omission as unknown, never as proven: "do not establish" (`main.Rmd:118`), "possible explanation" (`:126`), "may omit" (`supplement.Rmd:296`).
+- **Economic interpretation.** The prose limits claims to case-finding yield and explicitly disclaims placements prevented, cost savings and welfare (`main.Rmd:83, 259, 402`). The arithmetic is right: 22 more found, 4.7 times random, 154 events left outside the top 100, and 72 selected youth with no recorded placement.
+- **Implementation chatter.** I scanned all rendered prose and captions (code chunks excluded) for seeds, build commands, local paths, file names, and audit or revision history. There are no hits. The only software mention is the glmnet citation (`main.Rmd:123` in the rendered text), which is a legitimate methods statement.
+
+## Optional suggestions (not defects)
+
+- The 2015 window lies entirely inside the cohort-selection window. It addresses the late-2016 drop in recorded admissions, but it is *more*, not less, exposed to outcome-dependent selection. One clause in `supplement.Rmd:50` or `:111` would make this distinction explicit.
+- The tests don't cover `horizon_targeting.csv`, and nothing asserts that `long_prediction` equals the main fit's predictions. A recomputation check like the one at `test-targeting.R:48–52` would close this.
+- `scripts/targeting.R:29` reads `performance.csv` inside the loop. The 2015-endpoint core model has no reference AUC to check against.

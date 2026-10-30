@@ -1,0 +1,158 @@
+# Independent audit: `ooh_pred` (recorded out-of-home placement prediction)
+
+## 1. Readiness verdict
+
+**Nearly ready. I found no defect that changes a headline number.** The forecasting design holds up:
+
+- There is a fixed forecast origin (the date the prediction is made from), and predictors are checked to have been recorded before it.
+- Youth are held out by person.
+- Preprocessing is fitted only on training data, inside each cross-validation fold.
+- Each loss is compared against the right baseline.
+- The limits are stated honestly: the cohort was selected using later events, there is no proof that every placement was captured, and predictors come from a later snapshot.
+
+All nine items in `docs/audit.md` were dealt with: seven by a repair, two by a repair plus a stated limit.
+
+What's left:
+
+- **One predictor is in the models but not disclosed.**
+- **One forecast-origin limitation is stated wrongly.**
+- **The holdout split put about 35% more repeat-placement events in the test set than chance would** (z ≈ 2.3), and the paper doesn't mention it.
+- **The sensitivity table reports AUC only**, which hides that by Brier score and PR-AUC the reduced model matches or beats the full one.
+- A handful of editorial mismatches.
+
+None of these needs a new design. Two of them need a rerun if you want the numbers fixed rather than just disclosed (findings A3 and A5).
+
+**Tool limits, stated up front.** `Rscript`, `python3` and `awk` were all blocked by the permission sandbox. So I could not run R checks, refit models, or regenerate anything. Every finding below comes from:
+
+- reading the code,
+- arithmetic on the aggregate `tabs/*.csv` files,
+- `cut | sort | uniq` category counts on two source files (no records printed),
+- reading the rendered 12-page PDF.
+
+Wherever a finding would need a rerun to get a corrected value, I label it a hypothesis.
+
+---
+
+## 2. Ranked actionable findings
+
+### A. Things that affect inference or disclosure
+
+**A1. An undisclosed predictor: `cans_records` (confirmed).**
+- *What:* `summarize_cans()` adds `cans_records`, the number of pre-origin CANS assessments per youth (`R/data.R:63`). `prepare_matrix()` passes every column except `member_id` into the model (`R/models.R:14`).
+- *Evidence it's used:* the lasso keeps it with a non-zero coefficient in two of the three models: `tabs/repeat_placement_coefficients.csv` (−0.020) and `tabs/recorded_days_coefficients.csv` (−0.042). In the placement model it is a candidate but shrunk to zero.
+- *Why it matters:* the paper lists the predictors as CANS module means, demographics, and record indicators (`ms/main.Rmd:105–126`), and never mentions this one. It is a measure of how often a youth was assessed, not of clinical need. Because CANS data only start in 2012, it also partly measures how long the youth has been in the system.
+- *Fix:* disclose it in §2.3, or drop it and rerun.
+
+**A2. The forecast-origin limitation names the wrong thing (`ms/main.Rmd:60`).**
+- *What:* among its reasons the model can't be applied prospectively, the text says "claims cannot be established as available at the forecast origin". But claims are excluded from the models (`main.Rmd:113`, `prepare.R:42–56`), so this limits nothing.
+- *What it should say:* the real limitation at the origin is that historical snapshots of the predictors don't exist. The members file is a later snapshot, eligibility records have no entry dates, and diagnoses have update dates after the origin. The Discussion (`main.Rmd:251`) gets this right.
+- *Fix:* replace the claims clause with the snapshot limitation.
+
+**A3. The repeat-placement split is unbalanced, and the calibration figure isn't interpreted.**
+- *Arithmetic from the tables:* there are 178 repeat-placement events. 48 landed in the test set (1.565% of 3,067) and 130 in training (1.060% of 12,265). The training figure matches `mean_prediction = 0.010599` in `tabs/repeat_placement_baselines.csv` exactly.
+- *How unusual:* a purely random 80/20 split would put about 35.6 events in the test set, with a standard deviation of about 5.3. Getting 48 is about 2.3 standard deviations high, roughly a 2% chance.
+- *Effect:* the model's mean predicted probability on test youth is 1.08%, against an observed 1.57%. That one-third under-prediction overall is mostly luck of the split, not miscalibration. You can see it in Figure 3, left panel. Repeat-placement Brier score and PR-AUC also depend on the test-set event rate.
+- *Where the paper stands:* §4 does say the bootstrap intervals ignore split uncertainty, but no sentence interprets the figure. The split is also not stratified by outcome (`scripts/estimate.R:4`). Placement is balanced by chance (182 test events vs about 181 expected).
+- *Fix:* since you want a fresh analysis, stratify the split on the rarest outcome, or report results over repeated splits. At minimum, add one sentence on the under-prediction.
+- *Status:* a hypothesis about how much calibration would change, because I couldn't refit.
+
+**A4. The sensitivity table shows only AUC, and AUC is the metric that flatters the full model (`main.Rmd:218–245`).** From `tabs/performance.csv`:
+
+| Placement metric | Main (all predictors) | CANS + demographics only |
+|---|---|---|
+| ROC AUC | 0.778 | 0.748 |
+| PR AUC | 0.191 | **0.207** |
+| Brier score (lower is better) | 0.0522 | **0.0519** |
+
+- *Why it matters:* the table invites the reading that diagnosis, medication and eligibility indicators add predictive value. By probability accuracy (Brier score) and by how well it ranks the rare positives (PR-AUC), they don't. No paired interval is given for the 0.03 AUC gap; with 182 events it could plausibly be noise.
+- *Sensitivity rows have no intervals and no event counts in the paper.* The 180-day multiple-placement AUC of 0.800 rests on **8** test events.
+- *Fix:* add PR-AUC, Brier score and event counts to Table 6, and add a sentence that the record indicators don't improve probability accuracy.
+
+**A5. The penalty for the reduced occupied-day model sits at the edge of the search grid (confirmed; the size of the effect is a hypothesis).**
+- *What:* `core/recorded_days` selected λ = 0.001. That is the smallest value in the Gaussian grid `10^seq(2, -3)` (`R/models.R:48`), so the tuning wanted to go lower and couldn't.
+- *Likely effect:* small, because at λ near zero the lasso is close to ordinary least squares on about 30 predictors. But the reported MSE reduction of 0.126 is conditional on a truncated grid.
+- *Fix:* extend the grid, or check the selected λ against the grid's endpoints.
+
+### B. Editorial mismatches between prose and what the code does
+
+1. **The intro questions promise outcomes the paper doesn't estimate** (`main.Rmd:56`). It asks "how long a youth will be placed" and about being "readmitted". The next paragraph disclaims both, but the questions stand as written. Since correctness needs it, a short bridging clause is justified (e.g., "we approximate these with…").
+2. **"End by discussing concerns with interpreting coefficients"** (`main.Rmd:62`). The paper presents no coefficients. Either add a coefficient appendix with the stated caveats or reword.
+3. **"Creation and payment dates are in 2016"** (`main.Rmd:113`). `audit.R` reads `paiddate` but never summarizes it. Only the creation range is computed (2016-02-01 to 2016-07-18). My rough `cut` pass found about 1.03M paid dates in '16, one in '15, and about 13.9k blank. That pass isn't reliable, because about 19k lines contain quoted fields that can shift columns. Either compute the paid-date range in `audit.R` or drop "payment". The conclusion (exclude claims) stands either way.
+4. **The 699-day row is identical to the main row for both binary outcomes, by construction.** There are no admissions after 2016-11-02, so the extra days add no new starts. The table presents it as a sensitivity without saying so. Add a note.
+5. **The "minimum of 25 youth" rule never takes effect** (`main.Rmd:126`, `models.R:4`). 0.5% of the smallest fold (about 9,812 youth) is already 50. Harmless, but state it accurately.
+6. **The 0–3 rescoring has opposite meanings for needs and strengths.** Special values −1 and 4 are recoded to 0 (`main.Rmd:107`). On needs items, 0 means "no need". On strengths items (`rbcs_`, `rbcgs_`), 0 means "centerpiece strength", the best score. So recoding pushes the two module types in opposite directions. The project notes support the recode (`archive/pc_analysis.md:18`), and the missing-code sensitivity barely moves performance. But the module means in Figure 2 for Youth and Caregiver strengths carry this asymmetry, and the paper doesn't name it.
+7. **Pseudo-codes are presented as diagnoses.** Table 7 lists "NONE: None Identified" (66–72%) and "799.9 unknown cause" as "recorded diagnosis history", and both enter the model as indicators. They measure record-keeping intensity, not conditions. Add a sentence, or exclude them and rerun.
+8. **Formatting:**
+   - Dates render with leading zeros ("January 03, 2011", "November 02, 2016").
+   - Tables 1–2 lack thousands separators while the prose has them.
+   - The Figure 3 panels are in alphabetical order (multiple placements first). With shared axes, the multiple-placement panel is squeezed into 0–7% and is unreadable. Use per-panel limits or put placement first.
+   - The Table 4 caption says "fixed 0.5 threshold", but the Brier score doesn't depend on any threshold.
+9. **The methods sentence omits two packages.** `main.Rmd:144` lists glmnet, Hmisc and mlr3measures, but the threshold uses `pROC` and the bootstrap uses `boot`.
+
+### C. Reproducibility and code hygiene (no number changes)
+
+- **Stale claims in `docs/audit.md`:**
+  - Line 29 says the manuscript appendix "prints the principal old/new comparisons". It doesn't; historical comparisons were deliberately moved out (`editorial_changes.md`).
+  - Line 92's "held-out-feature perturbation check" is only the `age = 999` assertion in `test-models.R:3–6`. Describe it as that.
+- **`prepare_matrix()` pairs train and test columns by position, not name** (`models.R:17`, `names(test) <- names(train)`). It is correct today, because `record_features()` builds columns from the same full `records` in the same order on both calls. It would silently mislabel test columns if that ever changed. Select test columns by name before renaming.
+- **`main.Rmd:40` reads the individual-level `prepared.rds` and never uses it.** Remove it so rendering doesn't depend on individual records.
+- **Hard-coded values:** the date `"2016-11-30"` (`estimate.R:16`) and the label `days_699` (`main.Rmd:222`) could be derived from `audit_counts.csv`, as `end` effectively is.
+- **`.gitignore` problems:** it whitelists `data/raw.sha256`, which doesn't exist (the hashes are in `docs/source_hashes.csv`). It also ignores `archive/`, while the README says the archive is preserved. This is moot right now, because the directory is not a git repository.
+- **Code style:** idiomatic modern R (native pipe, `dplyr` join `relationship=` guards, `glmnet`, `mlr3measures`, `boot`, `testthat`, `renv`). The hand-rolled cross-validation instead of `cv.glmnet` is justified, because preprocessing has to be refitted inside each fold. I have no stylistic objections.
+
+---
+
+## 3. The nine `docs/audit.md` findings
+
+| # | Issue | Disposition | Evidence and what's left |
+|---|---|---|---|
+| 1 | CYBER date filter | **Repaired** | `prepare.R:44` uses `parse_date()`. `audit.R` checks the leaked count (208,842) and the correct count (917,452) with `stopifnot`, so they work as permanent gates. `test-outcomes.R` tests parsing at the date boundary. |
+| 2 | Evaluation was in-sample | **Repaired** | Person-level 80/20 split, 5-fold tuning inside development, vocabulary/medians/missingness indicators/zero-variance filter fitted inside each fold (`models.R:50–62`), refit, single test evaluation. Tests check train/test are disjoint and cover everyone. Left: one non-stratified split (A3). |
+| 3 | Forecast horizon | **Repaired + limitation** | Half-open window [2015-01-01, 2016-11-03); 180/365/699-day sensitivities; ascertainment limit stated. Left: 699-day binary rows are identical by construction (B4). |
+| 4 | Feature timing | **Repaired + limitation** | Claims excluded; medications filtered on creation date; CANS needs all three dates before the origin (99,803 vs 99,804 assessments). Diagnosis `updatedate` is read but unused; disclosed as "source updates". Left: the paid-date claim isn't computed (B3); the limitation is misnamed (A2). |
+| 5 | Outcome construction | **Repaired** | `build_outcomes()` is correct by inspection: interval union, half-open intervals, clipping, carryovers, invalid stays set to NA rather than 0, same-date starts not counted twice. Tested, including a 1,000-draw check against day-by-day enumeration. The renamed outcomes are honest. Left: intro framing (B1). |
+| 6 | Denominators | **Repaired** | Youth-level indicators; `eligibility_audit.csv` contrasts record share with youth share; tests assert the youth denominators. |
+| 7 | Missingness and constructs | **Repaired + sensitivity** | MCAR claim removed; missingness-by-year table; special-code sensitivity; `rbcgn`/`rbsrp`/`rbsd` labels checked against the item names in `docs/cans_items.csv` (they match the content). Left: strengths-direction asymmetry (B6); `cans_records` undisclosed (A1). |
+| 8 | LOS baseline | **Repaired** | Training mean for squared error, training median for absolute error (`models.R:95–96, 120–129`). The prose correctly reports the model losing on MAE (41.6 vs 25.5 days). |
+| 9 | Prose provenance | **Mostly repaired** | Inline numbers are generated from output files; I spot-checked every inline number in the PDF against the CSVs and all match. Left: A1, A2, B2, B3 and the stale `audit.md` lines (C). |
+
+---
+
+## 4. Scientific limitations that remain (all already disclosed unless marked)
+
+- **Selected cohort.** Inclusion depends on 2014–2015 behavioral health OOH admissions, which overlap the prediction window. The AUC is within-cohort discrimination and can't be carried over to a prospective population. Disclosed clearly (`main.Rmd:60, 70`).
+- **Ascertainment.** Every admission row has a discharge date, so ongoing stays may be missing. "No event" means "no record". Disclosed.
+- **No predictor snapshots.** Demographics come from a later snapshot, eligibility has no entry dates, and diagnoses can be updated. Disclosed in §2.3 and the Discussion, though misnamed in the intro (A2).
+- **Narrow uncertainty.** The bootstrap holds the model and split fixed, and dependence within families or providers isn't modelled. Disclosed. A3 is a concrete case of what it misses.
+- **No prior-placement history among the predictors (not disclosed, optional).** Prior OOH admissions are usually among the strongest predictors. Leaving them out is defensible here, since selection is tied to admissions, but it is a design choice worth one sentence.
+- **Race is a predictor (not discussed).** "Black" gets a positive coefficient in all three models. Any move toward an operational risk score needs a fairness and subgroup-calibration discussion. Optional for a descriptive paper.
+- **Different outcome definitions.** Multiple placements are not readmissions, and occupied days are not episode length. Disclosed carefully.
+
+---
+
+## 5. What I checked versus what I couldn't
+
+**Checked by reading code and arithmetic on aggregates:**
+- Every file listed in the prompt.
+- All 18 setting × outcome rows of `performance.csv`.
+- Baselines, calibration, cohort, audit counts, date ranges, coverage and characteristics tables.
+- That the window lengths are 672 and 699 days.
+- Event counts in the split (907 = 725 + 182; 178 = 130 + 48).
+- That the test count is 48 expectations, matching `verification.md`.
+- `check.log`: 0 failures, 0 warnings.
+- The rendered 12-page PDF page by page: inline numbers against the CSVs, figures and tables.
+- Source category counts (gender, ethnicity, race) to confirm the coding of unknown/other.
+- The CANS item-to-prefix map, and the archive notes behind the recode and submission-date rules.
+
+**Rejected candidates (checked and found fine):**
+- *Train/test column misalignment:* not a bug today (C).
+- *CANS members missing from the members file:* ruled out, because `mean(age)` and `mean(female)` have no missing values.
+- *308 "historical repeat" youth computed on a different cohort:* the old and new cohorts are the same 15,332 people (same size, and one is a subset of the other).
+- *Gender or ethnicity unknowns coded as zero:* the source has no blank gender values, and ethnicity "Other" (36%) gets its own indicator.
+- *Lambda at grid edge for the main models:* all are interior except `core/recorded_days` (A5).
+
+**Could not check:**
+- Any R execution: rebuilding, refitting, corrected values for A1/A3/A5, `audit.R` gates, lint.
+- A proper CSV parse of claims paid dates.
+- The HTML render.
+- The source extraction query or sampling frame, which are absent by design and not demanded here.

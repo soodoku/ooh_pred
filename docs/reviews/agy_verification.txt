@@ -1,0 +1,8 @@
+         cohort_unknown_race training_duplicate_indicator 
+                        1205                            1 
+    test_duplicate_indicator            test_only_missing 
+                           1                            0 
+# A tibble: 1 × 2
+  quantity                      value
+  <chr>                         <dbl>
+1 diagnosis_pre_origin_dropped 549596

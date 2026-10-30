@@ -1,0 +1,8 @@
+             outcome                brier             baseline 
+         "placement" "0.0514674770761474" "0.0558200299777372" 
+               skill 
+  "0.07797475034187" 
+              outcome                 brier              baseline 
+   "repeat_placement"  "0.0115212493763007"  "0.0116001030131598" 
+                skill 
+"0.00679766694913186" 

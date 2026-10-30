@@ -1,0 +1,133 @@
+# Follow-up audit of `ooh_pred` after the stratified-split revision
+
+## 1. Verdict
+
+**Ready, with three small fixes and one disclosure. I found no defect that changes a reported number.** Every revision listed in `response.md` is in the code and in the outputs. I recomputed the headline numbers by a separate route and they match.
+
+Three things are still worth fixing before circulation:
+
+- **The full-versus-reduced comparison depends on which split you draw.** I checked this by comparing the old and new splits.
+- **The multiple-placement model's probabilities are no more accurate than a constant guess,** even though it ranks youth well. The paper doesn't say this.
+- **One axis in the calibration figure is mislabelled:** the right panel prints 2.5% and 7.5% as "2%" and "8%".
+
+Unlike the previous review, I could run R this time. I ran read-only checks on the saved derived files and on the aggregate tables, and wrote only temporary page images to `/tmp`. I did not rerun the pipeline or edit anything.
+
+## 2. Ranked findings
+
+**F1. Split variability is larger than the paper's intervals suggest, and the full-versus-reduced reading depends on the split (checked; inferential).**
+
+`docs/reviews/pre_stratification_performance.csv` holds the results from the earlier random split; `tabs/performance.csv` holds the new stratified split.
+
+| Metric | Old split | New split (95% CI) |
+|---|---|---|
+| Placement PR-AUC, full model | 0.191 | 0.211 |
+| Placement PR-AUC, CANS + demographics | 0.207 | 0.165 |
+| Placement Brier score, full model | 0.0522 | 0.0515 |
+| Placement Brier score, CANS + demographics | 0.0519 | 0.0528 |
+| Multiple-placement PR-AUC, full model | 0.093 | 0.050 (0.030 to 0.089) |
+
+- **What changed:** on PR-AUC and Brier score, the ordering of the two placement models flips between splits. The old multiple-placement PR-AUC lies outside the new interval.
+- **Why that matters:** the paper's intervals hold the trained model and the split fixed. Moving from one 80/20 split to another moves estimates by more than those intervals cover.
+- **What the paper already says:** it states this limitation in general terms (`ms/main.Rmd:147`, `:343`) and claims no significant paired difference.
+- **What is still exposed:** the sentence at `ms/main.Rmd:271` sets one split's point estimates side by side, and readers will take the ordering as informative.
+- **Fix:** report the full-versus-reduced difference across repeated stratified splits (say 20–50, or nested cross-validation), or add a sentence saying the ordering is not stable across splits.
+- **Hypothesis, not tested:** I did not run repeated splits, so I can't say how wide the across-split spread is. Note also that the two runs differ in the split *and* in the internal fold assignment, so I can't separate their effects.
+
+**F2. The multiple-placement model ranks well but its probabilities are no better than a constant (checked; interpretation not stated).**
+
+- *Brier skill* is the share of the constant guess's Brier score that the model removes. The constant guess predicts the training event rate for every youth.
+- From `tabs/repeat_placement_baselines.csv`, the Brier score is 0.011521 for the lasso and 0.011600 for the constant guess.
+- On the saved test predictions, with 2,000 person-level resamples:
+  - Multiple placements: Brier skill **0.7% (95% CI −2.4% to 3.0%)**.
+  - Placement: Brier skill **7.8% (4.7% to 10.9%)**.
+- Table 4 shows 0.012 against 0.012, but the prose (`main.Rmd:189–191`, "shows predictive signal") never says the gain is in *ranking* only (ROC AUC 0.85), not in probability accuracy.
+- **Fix:** add one sentence.
+
+**F3. Calibration-figure tick labels are wrong in the right panel (checked).**
+
+- I rebuilt the plot in memory with `ggplot_build`. The right panel's ticks sit at 0, 0.025, 0.05 and 0.075, but are labelled "0%, 2%, 5%, 8%".
+- The cause is `scales::label_percent(accuracy = 1)` at `scripts/figures.R:30–31`, which rounds 2.5% and 7.5% to whole percentages. It is visible on rendered page 9.
+- The caption's claim that horizontal and vertical ranges match within each panel is true: both axes run from −0.0045 to 0.0945 on the right and −0.015 to 0.315 on the left.
+- Cosmetic side issue: the fixed error-bar `width = 0.004` draws heavy black blocks near zero in the rare-event panel.
+- **Fix:** use `accuracy = 0.1` or set the breaks explicitly.
+
+**F4. Minor editorial points (checked).**
+
+- **365-day multiple-placement result:** its ROC AUC of 0.901, the largest number in Table 8, rests on 16 test events. Its sensitivity interval in `performance.csv` is degenerate (1.000 [1.000, 1.000]). The prose flags only the 180-day result, which has 7 events.
+- **Reduced model for multiple placements:** it has higher PR-AUC (0.057 vs 0.050) and lower Brier score (0.0113 vs 0.0115) than the full model, but lower ROC AUC (0.797 vs 0.849). `main.Rmd:271` discusses placement only.
+- **Table 6 repeats Tables 7–8.** Its AUC columns duplicate theirs. Table 6 could keep only occupied days.
+- **Leftovers from the previous review:**
+  - Dates still render with leading zeros ("January 03, 2011").
+  - `2016-11-30` is hard-coded in `scripts/estimate.R:26`. It equals the last discharge date plus one day (699 = `last_discharge_horizon`), but nothing asserts that.
+
+## 3. Status of the previous review's findings
+
+| Item | Status | Evidence |
+|---|---|---|
+| **A1** `cans_records` predictor | Resolved | Disclosed at `main.Rmd:104`. On the new split its coefficient is zero in all three main models (read from the saved fits). |
+| **A2** wrong limitation in the intro | Resolved | `main.Rmd:59`. |
+| **A3** unbalanced split | Resolved | See below. |
+| **A4** sensitivity table showed AUC only | Resolved | Tables 6–8 add PR-AUC, Brier, event counts and intervals; the prose is computed from the outputs. F1 and F4 remain. |
+| **A5** penalty at the grid edge | Resolved | See below. |
+| **B1, B2, B4, B5, B6, B7, B9** | Resolved in the text | Lines 55, 61, 271, 125, 106, 289 and 143. |
+| **B3** claims payment dates | Resolved | `audit.R:32–33` asserts that every payment date parses and falls in 2016. `date_ranges.csv` gives 2016-02-03 to 2016-07-20. The response's rejection of my earlier delimiter-based estimate is correct. |
+| **B8** formatting | Mostly resolved | Thousands separators, Table 4 caption and figure panel order are fixed. Date leading zeros remain. |
+| **C** code hygiene | Resolved except one item | Stale `audit.md` lines fixed. `prepare_matrix` now matches test columns by name, with a reordered-input test (`test-models.R:7–12`). The `.Rmd` no longer reads individual-level RDS files (grep finds none). The hard-coded end date remains. |
+
+**A3 in detail (checked):**
+- The development/test allocation by number of placements (0, 1, 2+) is 11,540/2,885, 583/146 and 142/36. Each development count equals floor(0.8 × stratum size), and a test asserts this.
+- Multiple-placement rates now line up: development 1.16%, test 1.17%, mean prediction 1.22%.
+- Calibration slope is 1.08 (95% CI 0.79 to 1.37) for multiple placements and 1.12 (0.95 to 1.28) for placement. Calibration-in-the-large (the overall offset between predicted and observed rates) is about 0.
+- Reproducing the fold assignment gives 145 placement events in every fold and 28–29 multiple-placement events per fold.
+
+**A5 in detail (checked from `tuning.csv`):**
+- All 12 binary searches select a penalty strictly inside the grid (positions 33–44 of 50).
+- The Gaussian grid has 67 values.
+- Only the reduced occupied-day model selects λ = 0. That is the natural lower bound (an unpenalized fit), not a truncated grid.
+
+## 4. The nine `docs/audit.md` items
+
+| # | Disposition | Evidence |
+|---|---|---|
+| 1 | Repaired and gated | `parse_date`; `audit.R:133–137` hard-checks the leaked count (208,842) and the correct count (917,452). |
+| 2 | Repaired | Stratified outer split; development-only preprocessing inside each fold; tests confirm train/test are disjoint and cover everyone, and that predictions are test-only. Limitation: one split (F1). |
+| 3 | Repaired + limitation | Horizons of 672, 180, 365 and 699 days. 699 = 672 for the binary outcomes, by construction and stated. |
+| 4 | Repaired + limitation | Claims excluded, with the payment-date assertion. CANS three-date rule (99,803 vs 99,804). Missing snapshots disclosed. |
+| 5 | Repaired | `build_outcomes` and the interval union are tested against brute-force day-by-day enumeration. |
+| 6 | Repaired | Youth denominators, with a test. |
+| 7 | Repaired + sensitivity | Special-code sensitivity analysis; strengths/needs wording; item map. |
+| 8 | Repaired | Mean and median baselines both recomputed. The model loses on MAE (43.8 vs 28.3 days), and the paper says so. |
+| 9 | Repaired | Inline numbers are generated. I spot-checked pages 8–10 against the CSVs and all match. |
+
+## 5. Remaining scientific limits (all disclosed)
+
+- **Selected cohort:** the sample was chosen partly using prediction-window events, so results describe discrimination within this cohort only.
+- **Incomplete ascertainment:** a missing admission record is not proof of no placement.
+- **No historical snapshots** of the predictors.
+- **Narrow intervals:** they hold the trained model and split fixed, and ignore dependence within families. F1 is concrete evidence that this matters.
+- **Optional extensions, not demands:** prior-placement predictors; subgroup calibration if the model is ever used operationally.
+
+## 6. What I checked versus what I didn't
+
+**Checked by running code:**
+- Row alignment across the three tables that share split indices: `features`, `outcomes` and `features_missing`.
+- Test-set truth labels matched to outcomes by member ID.
+- Constant-guess baselines equal the development mean.
+- Test ROC AUC by two routes (pROC and a Mann-Whitney pairwise comparison): 0.7883 and 0.8487.
+- Test Brier, RMSE and MAE, and the threshold confusion counts (143 of 1,169 flagged youth are events, precision 0.1223).
+- Fold stratification, the calibration bins, slope and calibration-in-the-large.
+- Brier skill with bootstrap intervals.
+- Tuning grid edges, and bootstrap valid-draw counts (the minimum is 999, for the 180-day multiple-placement run).
+- 699-day binary results identical to the main results.
+- Calibration figure scales.
+- Old-versus-new split comparison.
+- Rendered PDF pages 8–10.
+- `check.log`: 56 passed, 0 failed.
+
+**Read only:** all R code, tests, `response.md`, `audit.md`, `.gitignore` and the manuscript source.
+
+**Hypotheses, not tested:**
+- How large the across-split spread is (F1).
+- Whether a paired full-versus-reduced difference would be significant. Only the main model's test predictions are saved, so I can't pair them with the reduced model's.
+
+**Not done:** a full pipeline rebuild, lint, the HTML render, PDF pages other than 8–10, and the claims-source parse (I relied on the assertion in `audit.R`).
